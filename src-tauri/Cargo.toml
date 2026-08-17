@@ -1,0 +1,28 @@
+[package]
+name = "maho-crawl"
+version = "0.1.0"
+description = "MahoCrawl website capture workspace"
+authors = ["MahoCrawl"]
+edition = "2021"
+
+[lib]
+name = "maho_crawl_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["clock"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+thiserror = "2"
+url = "2"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
