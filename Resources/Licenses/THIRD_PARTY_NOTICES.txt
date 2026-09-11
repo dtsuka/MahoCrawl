@@ -1,0 +1,32 @@
+MahoCrawl Third-Party Notices
+=============================
+
+This application bundles a customized build of SiteOne Crawler and patches to
+chromiumoxide for scoped browser Basic authentication.
+
+SiteOne Crawler
+---------------
+Copyright (c) 2023-2026 Ján Regeš
+License: MIT
+Source: https://github.com/janreges/siteone-crawler
+Base version: v2.5.1
+Customization: browser Basic auth forwarding via scoped CDP credentials and
+--http-auth-stdin for secret delivery.
+
+chromiumoxide
+-------------
+Copyright (c) 2020 Matthias Seitz
+License: MIT OR Apache-2.0
+Source: https://github.com/mattsse/chromiumoxide
+Base version: v0.9.1
+Customization: ScopedCredentials and origin-limited Fetch.authRequired handling.
+
+Chrome DevTools Protocol definitions
+------------------------------------
+Copyright The Chromium Authors
+License: BSD-style (see Chromium project)
+
+Other dependencies
+------------------
+See the upstream SiteOne Crawler and chromiumoxide repositories for their full
+dependency license inventories.

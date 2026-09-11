@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   cloneConfiguration,
+  sanitizeConfigurationForStorage,
   DEFAULT_CONFIGURATION,
   filterAndSortCaptures,
   formatBytes,
@@ -15,7 +16,7 @@ describe('capture viewport configuration', () => {
     expect(DEFAULT_CONFIGURATION.captures.map((capture) => `${capture.width}x${capture.height}`)).toEqual(['1440x900', '768x1024', '390x844'])
   })
 
-  it('rejects duplicate dimensions and a disabled queue', () => {
+  it('rejects duplicate dimensions but allows metadata-only crawling', () => {
     const configuration = cloneConfiguration(DEFAULT_CONFIGURATION)
     configuration.captures[1].width = 1440
     configuration.captures[1].height = 900
@@ -23,7 +24,9 @@ describe('capture viewport configuration', () => {
     configuration.captures[1].width = 768
     configuration.captures[1].height = 1024
     configuration.captures.forEach((capture) => { capture.enabled = false })
-    expect(validateConfiguration(configuration)).toContain('有効なキャプチャサイズを1件以上残してください。')
+    expect(validateConfiguration(configuration)).toEqual([])
+    configuration.captures = []
+    expect(validateConfiguration(configuration)).toEqual([])
   })
 
   it('validates URL, worker and dimension ranges', () => {
@@ -35,6 +38,52 @@ describe('capture viewport configuration', () => {
     expect(errors).toContain('http または https で始まる有効なURLを入力してください。')
     expect(errors).toContain('同時処理数が範囲外です。')
     expect(errors).toContain('画面サイズは幅・高さとも320〜8192pxで指定してください。')
+  })
+
+  it('does not persist Basic auth passwords in stored configuration', () => {
+    const configuration = cloneConfiguration(DEFAULT_CONFIGURATION)
+    configuration.httpAuthUser = 'staging'
+    configuration.httpAuthPassword = 'secret'
+    const stored = sanitizeConfigurationForStorage(configuration)
+    expect(stored.httpAuthUser).toBe('staging')
+    expect(stored.httpAuthPassword).toBe('')
+    expect(configuration.httpAuthPassword).toBe('secret')
+  })
+
+  it('treats empty Basic auth as optional and rejects incomplete or colon usernames', () => {
+    const configuration = cloneConfiguration(DEFAULT_CONFIGURATION)
+    expect(configuration.httpAuthUser).toBe('')
+    expect(configuration.httpAuthPassword).toBe('')
+    expect(validateConfiguration(configuration)).toEqual([])
+
+    configuration.httpAuthPassword = 'secret'
+    expect(validateConfiguration(configuration)).toContain('Basic認証のユーザー名を入力してください。')
+
+    configuration.httpAuthUser = 'user:name'
+    configuration.httpAuthPassword = 'secret'
+    expect(validateConfiguration(configuration)).toContain('Basic認証のユーザー名にコロンは使えません。')
+
+    configuration.httpAuthUser = 'user'
+    configuration.httpAuthPassword = 'p:ass word'
+    expect(validateConfiguration(configuration)).toEqual([])
+
+    configuration.httpAuthUser = 'user'
+    configuration.httpAuthPassword = 'secret\n'
+    expect(validateConfiguration(configuration)).toContain('Basic認証に使用できない文字が含まれています。')
+  })
+
+  it('rejects non-finite, fractional and blank numeric values without coercing them', () => {
+    const invalidValues: unknown[] = [NaN, Infinity, -Infinity, 1.5, '', '3']
+    for (const value of invalidValues) {
+      const configuration = cloneConfiguration(DEFAULT_CONFIGURATION)
+      ;(configuration as unknown as { workers: unknown }).workers = value
+      expect(validateConfiguration(configuration)).toContain('同時処理数が範囲外です。')
+      expect((configuration as unknown as { workers: unknown }).workers).toBe(value)
+    }
+
+    const decimalViewport = cloneConfiguration(DEFAULT_CONFIGURATION)
+    ;(decimalViewport.captures[0] as unknown as { width: unknown }).width = 1440.5
+    expect(validateConfiguration(decimalViewport)).toContain('画面サイズは幅・高さとも320〜8192pxで指定してください。')
   })
 
   it('creates a safe deterministic size slug', () => {

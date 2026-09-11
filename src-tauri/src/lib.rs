@@ -2,9 +2,9 @@ use base64::Engine;
 use chrono::Local;
 use image::{codecs::jpeg::JpegEncoder, ImageReader};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, ErrorKind, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -19,6 +19,7 @@ use url::Url;
 const MIN_DIMENSION: u32 = 320;
 const MAX_DIMENSION: u32 = 8192;
 const MAX_LOG_LENGTH: usize = 400_000;
+const MAX_REPORT_LENGTH: u64 = 16 * 1024 * 1024;
 const CONFIG_FILENAME: &str = "configuration.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -65,6 +66,10 @@ pub struct CrawlConfiguration {
     #[serde(default)]
     pub user_agent: String,
     #[serde(default)]
+    pub http_auth_user: String,
+    #[serde(default, skip_serializing)]
+    pub http_auth_password: String,
+    #[serde(default)]
     pub screenshot_mode: ScreenshotMode,
     #[serde(default)]
     pub screenshot_format: ScreenshotFormat,
@@ -98,6 +103,8 @@ impl Default for CrawlConfiguration {
             target_url: default_target_url(),
             single_page: false,
             user_agent: String::new(),
+            http_auth_user: String::new(),
+            http_auth_password: String::new(),
             screenshot_mode: ScreenshotMode::FullPage,
             screenshot_format: ScreenshotFormat::Png,
             hide_cookie_banner: true,
@@ -137,17 +144,13 @@ impl CrawlConfiguration {
         if self.output_root.trim().is_empty() {
             return Err(ValidationError::MissingOutputFolder);
         }
+        self.http_auth_value()?;
         let root = expand_path(self.output_root.trim());
         if !root.is_absolute() {
             return Err(ValidationError::OutputFolderMustBeAbsolute);
         }
-        if self.captures.is_empty() {
-            return Err(ValidationError::MissingCaptureSize);
-        }
-
         let mut ids = HashSet::new();
         let mut dimensions = HashSet::new();
-        let mut enabled_count = 0;
         for viewport in &self.captures {
             if viewport.id.trim().is_empty() || viewport.id.len() > 80 {
                 return Err(ValidationError::InvalidCaptureId);
@@ -167,12 +170,6 @@ impl CrawlConfiguration {
             if !dimensions.insert((viewport.width, viewport.height)) {
                 return Err(ValidationError::DuplicateViewport);
             }
-            if viewport.enabled {
-                enabled_count += 1;
-            }
-        }
-        if enabled_count == 0 {
-            return Err(ValidationError::NoEnabledCaptureSize);
         }
         Ok(())
     }
@@ -184,6 +181,34 @@ impl CrawlConfiguration {
             .cloned()
             .collect()
     }
+
+    fn http_auth_value(&self) -> Result<Option<String>, ValidationError> {
+        let user = self.http_auth_user.trim();
+        let password = self.http_auth_password.as_str();
+        if user.is_empty() && password.is_empty() {
+            return Ok(None);
+        }
+        if user.is_empty() {
+            return Err(ValidationError::MissingHttpAuthUser);
+        }
+        if user.contains(':') {
+            return Err(ValidationError::InvalidHttpAuthUser);
+        }
+        if contains_disallowed_auth_char(user) || contains_disallowed_auth_char(password) {
+            return Err(ValidationError::InvalidHttpAuthValue);
+        }
+        Ok(Some(format!("{user}:{password}")))
+    }
+
+    fn for_storage(&self) -> Self {
+        let mut stored = self.clone();
+        stored.http_auth_password.clear();
+        stored
+    }
+}
+
+fn contains_disallowed_auth_char(value: &str) -> bool {
+    value.chars().any(|character| character.is_control())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -323,6 +348,28 @@ pub struct CaptureImage {
     pub data_base64: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SeoPageItem {
+    pub url: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub canonical: Option<String>,
+    pub og_title: Option<String>,
+    pub og_description: Option<String>,
+    pub og_image: Option<String>,
+    pub twitter_title: Option<String>,
+    pub twitter_description: Option<String>,
+    pub twitter_image: Option<String>,
+    pub h1: Option<String>,
+    pub h2: Option<String>,
+    pub size_ids: Vec<String>,
+    pub size_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub capture_by_size: HashMap<String, CaptureItem>,
+    pub status: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StartResponse {
@@ -349,10 +396,6 @@ pub enum ValidationError {
     MissingOutputFolder,
     #[error("保存先は絶対パスで指定してください。")]
     OutputFolderMustBeAbsolute,
-    #[error("キャプチャサイズを1件以上登録してください。")]
-    MissingCaptureSize,
-    #[error("有効なキャプチャサイズを1件以上残してください。")]
-    NoEnabledCaptureSize,
     #[error("キャプチャサイズのIDが不正です。")]
     InvalidCaptureId,
     #[error("キャプチャサイズ名は1〜80文字で指定してください。")]
@@ -361,6 +404,12 @@ pub enum ValidationError {
     DuplicateCaptureId,
     #[error("キャプチャサイズの幅・高さが重複しています。")]
     DuplicateViewport,
+    #[error("Basic認証のユーザー名を入力してください。")]
+    MissingHttpAuthUser,
+    #[error("Basic認証のユーザー名にコロンは使えません。")]
+    InvalidHttpAuthUser,
+    #[error("Basic認証に使用できない文字が含まれています。")]
+    InvalidHttpAuthValue,
 }
 
 #[derive(Debug, Error)]
@@ -384,9 +433,9 @@ struct RuntimeState {
     status: CrawlStatus,
     log: String,
     cancel_requested: bool,
+    start_in_progress: bool,
     child: Option<Child>,
     allowed_open_roots: Vec<PathBuf>,
-    run_captures: Vec<CaptureViewport>,
 }
 
 impl Default for RuntimeState {
@@ -395,9 +444,9 @@ impl Default for RuntimeState {
             status: CrawlStatus::default(),
             log: String::new(),
             cancel_requested: false,
+            start_in_progress: false,
             child: None,
             allowed_open_roots: Vec::new(),
-            run_captures: Vec::new(),
         }
     }
 }
@@ -498,8 +547,10 @@ pub fn safe_size_slug(viewport: &CaptureViewport) -> String {
     )
 }
 
-fn output_plan_for(root: &Path, viewport: &CaptureViewport) -> OutputPlan {
-    let size_slug = safe_size_slug(viewport);
+fn output_plan_for(root: &Path, viewport: Option<&CaptureViewport>) -> OutputPlan {
+    let size_slug = viewport
+        .map(safe_size_slug)
+        .unwrap_or_else(|| "metadata".into());
     let size_root = root.join(&size_slug);
     OutputPlan {
         root: root.to_string_lossy().to_string(),
@@ -517,9 +568,12 @@ fn output_plan_for(root: &Path, viewport: &CaptureViewport) -> OutputPlan {
 }
 
 fn output_plans_for_root(root: &Path, captures: &[CaptureViewport]) -> Vec<OutputPlan> {
+    if captures.is_empty() {
+        return vec![output_plan_for(root, None)];
+    }
     captures
         .iter()
-        .map(|viewport| output_plan_for(root, viewport))
+        .map(|viewport| output_plan_for(root, Some(viewport)))
         .collect()
 }
 
@@ -547,7 +601,7 @@ pub fn make_output_plans(
 
 pub fn build_arguments(
     configuration: &CrawlConfiguration,
-    viewport: &CaptureViewport,
+    viewport: Option<&CaptureViewport>,
     plan: &OutputPlan,
     timezone: &str,
 ) -> Result<Vec<String>, ValidationError> {
@@ -556,25 +610,7 @@ pub fn build_arguments(
         Url::parse(configuration.target_url.trim()).map_err(|_| ValidationError::InvalidUrl)?;
     let mut arguments = vec![
         format!("--url={}", url.as_str()),
-        "--browser".to_string(),
-        "--screenshots".to_string(),
-        format!("--screenshots-dir={}", plan.captures),
-        format!(
-            "--screenshot-mode={}",
-            configuration.screenshot_mode.as_cli()
-        ),
-        format!(
-            "--screenshot-viewport={}x{}",
-            viewport.width, viewport.height
-        ),
-        format!(
-            "--screenshot-format={}",
-            configuration.screenshot_format.as_cli()
-        ),
-        format!("--browser-wait={}", configuration.browser_wait.as_cli()),
-        format!("--browser-timeout={}", configuration.browser_timeout),
         format!("--workers={}", configuration.workers),
-        format!("--browser-workers={}", configuration.browser_workers),
         format!(
             "--max-reqs-per-sec={}",
             configuration.max_requests_per_second
@@ -583,6 +619,7 @@ pub fn build_arguments(
         format!("--output-html-report={}", plan.html_report),
         format!("--output-json-file={}", plan.json_report),
         format!("--output-text-file={}", plan.text_report),
+        "--extra-columns=Canonical=xpath://link[@rel='canonical']/@href(200>)".to_string(),
         format!("--timezone={}", timezone),
         "--no-color".to_string(),
         "--hide-progress-bar".to_string(),
@@ -601,15 +638,40 @@ pub fn build_arguments(
         };
         arguments.push(format!("--user-agent={}", exact));
     }
-    let browser_path = configuration.browser_path.trim();
-    if !browser_path.is_empty() {
-        arguments.push(format!(
-            "--browser-path={}",
-            expand_path(browser_path).display()
-        ));
+    if configuration.http_auth_value()?.is_some() {
+        arguments.push("--http-auth-stdin".to_string());
     }
-    if configuration.auto_download_browser {
-        arguments.push("--browser-auto-download".to_string());
+    if let Some(viewport) = viewport {
+        arguments.extend([
+            "--browser".to_string(),
+            "--screenshots".to_string(),
+            format!("--screenshots-dir={}", plan.captures),
+            format!(
+                "--screenshot-mode={}",
+                configuration.screenshot_mode.as_cli()
+            ),
+            format!(
+                "--screenshot-viewport={}x{}",
+                viewport.width, viewport.height
+            ),
+            format!(
+                "--screenshot-format={}",
+                configuration.screenshot_format.as_cli()
+            ),
+            format!("--browser-wait={}", configuration.browser_wait.as_cli()),
+            format!("--browser-timeout={}", configuration.browser_timeout),
+            format!("--browser-workers={}", configuration.browser_workers),
+        ]);
+        let browser_path = configuration.browser_path.trim();
+        if !browser_path.is_empty() {
+            arguments.push(format!(
+                "--browser-path={}",
+                expand_path(browser_path).display()
+            ));
+        }
+        if configuration.auto_download_browser {
+            arguments.push("--browser-auto-download".to_string());
+        }
     }
     // SiteOne Crawler 2.5.1 has no cookie-banner CLI flag. The value is
     // persisted and surfaced in the UI; keeping it out of argv avoids passing
@@ -748,13 +810,22 @@ fn emit_status(app: &AppHandle, state: &SharedState) {
     }
 }
 
+fn trim_log_to_limit(log: &mut String) {
+    if log.len() <= MAX_LOG_LENGTH {
+        return;
+    }
+    let remove = log.len() - MAX_LOG_LENGTH;
+    let boundary = log
+        .char_indices()
+        .find_map(|(index, _)| (index >= remove).then_some(index))
+        .unwrap_or(log.len());
+    log.drain(..boundary);
+}
+
 fn append_log(app: &AppHandle, state: &SharedState, text: &str) {
     if let Ok(mut guard) = state.lock() {
         guard.log.push_str(text);
-        if guard.log.len() > MAX_LOG_LENGTH {
-            let remove = guard.log.len() - MAX_LOG_LENGTH;
-            guard.log.drain(..remove);
-        }
+        trim_log_to_limit(&mut guard.log);
     }
     emit(app, "crawl://output", &serde_json::json!({ "text": text }));
 }
@@ -777,6 +848,23 @@ fn was_cancel_requested(state: &SharedState) -> bool {
         .unwrap_or(true)
 }
 
+fn reserve_start(state: &SharedState) -> Result<(), String> {
+    let mut guard = state
+        .lock()
+        .map_err(|_| "状態を更新できません".to_string())?;
+    if guard.start_in_progress || guard.status.phase.is_active() {
+        return Err(CrawlError::AlreadyRunning.to_string());
+    }
+    guard.start_in_progress = true;
+    Ok(())
+}
+
+fn clear_start_reservation(state: &SharedState) {
+    if let Ok(mut guard) = state.lock() {
+        guard.start_in_progress = false;
+    }
+}
+
 fn make_unique_run_root(base: &Path) -> PathBuf {
     let mut candidate = base.to_path_buf();
     let mut suffix = 2;
@@ -791,22 +879,34 @@ fn make_unique_run_root(base: &Path) -> PathBuf {
     candidate
 }
 
+fn child_exit_code(child: &mut Child) -> Result<Option<i32>, CrawlError> {
+    child
+        .try_wait()
+        .map(|status| status.map(|status| status.code().unwrap_or(1)))
+        .map_err(|error| CrawlError::Io(error.to_string()))
+}
+
 fn run_child(
     app: &AppHandle,
     state: &SharedState,
     binary: &Path,
     arguments: &[String],
     cwd: &Path,
+    stdin_payload: Option<&str>,
 ) -> Result<i32, CrawlError> {
     let mut command = Command::new(binary);
     command
         .args(arguments)
         .current_dir(cwd)
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("NO_COLOR", "1")
         .env("TERM", "dumb");
+    if let Some(payload) = stdin_payload {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
     #[cfg(unix)]
     unsafe {
         command.pre_exec(|| {
@@ -819,6 +919,13 @@ fn run_child(
     let mut child = command
         .spawn()
         .map_err(|error| CrawlError::Io(error.to_string()))?;
+    if let Some(payload) = stdin_payload {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(payload.as_bytes())
+                .map_err(|error| CrawlError::Io(error.to_string()))?;
+        }
+    }
     let child_pid = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -865,12 +972,17 @@ fn run_child(
         while let Ok(text) = receiver.try_recv() {
             append_log(app, state, &text);
         }
-        let finished = state
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.child.as_mut().and_then(|child| child.try_wait().ok()));
-        if let Some(result) = finished {
-            let exit_code = result.map(|status| status.code().unwrap_or(1)).unwrap_or(1);
+        let finished = {
+            let mut guard = state
+                .lock()
+                .map_err(|error| CrawlError::Io(error.to_string()))?;
+            let child = guard
+                .child
+                .as_mut()
+                .ok_or_else(|| CrawlError::Io("クロールプロセスが見つかりません。".into()))?;
+            child_exit_code(child)?
+        };
+        if let Some(exit_code) = finished {
             // Reader threads may still be draining a final stderr chunk. Wait
             // until both streams close so no tail is lost in the UI log.
             loop {
@@ -914,13 +1026,18 @@ fn run_queue(
         }
     };
     append_log(&app, &state, &format!("Engine: {}\n", binary.display()));
-    for (index, viewport) in enabled.iter().enumerate() {
+    for (index, plan) in plans.iter().enumerate() {
         if was_cancel_requested(&state) {
             break;
         }
-        let plan = plans[index].clone();
+        let viewport = enabled.get(index);
         let size_root = PathBuf::from(&plan.size_root);
-        if let Err(error) = fs::create_dir_all(&plan.captures) {
+        let output_directory = if viewport.is_some() {
+            &plan.captures
+        } else {
+            &plan.size_root
+        };
+        if let Err(error) = fs::create_dir_all(output_directory) {
             append_log(
                 &app,
                 &state,
@@ -947,26 +1064,31 @@ fn run_queue(
             return;
         }
         if let Ok(mut guard) = state.lock() {
-            guard.status.size_index = index + 1;
-            guard.status.current_size_id = Some(viewport.id.clone());
-            guard.status.current_size_label = Some(viewport.label.clone());
+            guard.status.size_index = if viewport.is_some() { index + 1 } else { 0 };
+            guard.status.current_size_id = viewport.map(|size| size.id.clone());
+            guard.status.current_size_label = viewport.map(|size| size.label.clone());
             guard.status.current_plan = Some(plan.clone());
-            guard.status.message = Some(format!("{} を撮影中", viewport.label));
+            guard.status.message = Some(viewport.map_or_else(
+                || "メタ情報を取得中".to_string(),
+                |size| format!("{} を撮影中", size.label),
+            ));
         }
         emit_status(&app, &state);
-        append_log(
-            &app,
-            &state,
-            &format!(
-                "\n[サイズ {}/{}] {} ({}x{})\n",
-                index + 1,
-                enabled.len(),
-                viewport.label,
-                viewport.width,
-                viewport.height
-            ),
+        let step_label = viewport.map_or_else(
+            || "\nメタ情報のみ取得します（キャプチャなし）。\n".to_string(),
+            |viewport| {
+                format!(
+                    "\n[サイズ {}/{}] {} ({}x{})\n",
+                    index + 1,
+                    enabled.len(),
+                    viewport.label,
+                    viewport.width,
+                    viewport.height
+                )
+            },
         );
-        let arguments = match build_arguments(&configuration, viewport, &plan, "Asia/Tokyo") {
+        append_log(&app, &state, &step_label);
+        let arguments = match build_arguments(&configuration, viewport, plan, "Asia/Tokyo") {
             Ok(arguments) => arguments,
             Err(error) => {
                 append_log(&app, &state, &format!("実行引数エラー: {}\n", error));
@@ -978,7 +1100,36 @@ fn run_queue(
                 return;
             }
         };
-        let child_result = run_child(&app, &state, &binary, &arguments, &size_root);
+        let stdin_payload = configuration.http_auth_value().ok().flatten();
+        let child_result = run_child(
+            &app,
+            &state,
+            &binary,
+            &arguments,
+            &size_root,
+            stdin_payload.as_deref(),
+        );
+        if viewport.is_some() {
+            match filter_non_page_screenshots(
+                Path::new(&plan.json_report),
+                Path::new(&plan.captures),
+            ) {
+                Ok(removed) if removed > 0 => append_log(
+                    &app,
+                    &state,
+                    &format!(
+                        "ページ以外のスクリーンショットを{}件除外しました。\n",
+                        removed
+                    ),
+                ),
+                Ok(_) => {}
+                Err(error) => append_log(
+                    &app,
+                    &state,
+                    &format!("スクリーンショットの整理をスキップしました: {}\n", error),
+                ),
+            }
+        }
         // The cache is private to this size and disposable. Removing it after
         // the child exits keeps the run tree report/gallery-oriented while the
         // hidden-directory guard below protects interrupted runs.
@@ -1023,10 +1174,14 @@ fn run_queue(
     if let Ok(mut guard) = state.lock() {
         if guard.cancel_requested {
             guard.status.phase = RunPhase::Cancelled;
-            guard.status.message = Some("残りのサイズをキャンセルしました".to_string());
+            guard.status.message = Some("クロールを中止しました".to_string());
         } else {
             guard.status.phase = RunPhase::Succeeded;
-            guard.status.message = Some("すべてのサイズが完了しました".to_string());
+            guard.status.message = Some(if enabled.is_empty() {
+                "メタ情報の取得が完了しました".to_string()
+            } else {
+                "すべてのサイズが完了しました".to_string()
+            });
         }
         guard.status.current_size_id = None;
         guard.status.current_size_label = None;
@@ -1124,14 +1279,568 @@ fn list_capture_items(
     Ok(captures)
 }
 
-#[tauri::command]
-fn load_configuration(app: AppHandle) -> Result<CrawlConfiguration, String> {
-    let path = config_path(&app).map_err(|error| error.to_string())?;
-    let data = match fs::read(path) {
-        Ok(data) => data,
-        Err(_) => return Ok(CrawlConfiguration::default()),
+fn is_page_screenshot_url(raw_url: &str) -> bool {
+    let Ok(url) = Url::parse(raw_url) else {
+        return true;
     };
-    serde_json::from_slice(&data).map_err(|error| error.to_string())
+    let Some(last_segment) = url.path().rsplit('/').next() else {
+        return true;
+    };
+    let Some((_, extension)) = last_segment.rsplit_once('.') else {
+        return true;
+    };
+    if extension.is_empty() {
+        return true;
+    }
+    !matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "7z" | "7zip"
+            | "aac"
+            | "avif"
+            | "avi"
+            | "bmp"
+            | "css"
+            | "csv"
+            | "doc"
+            | "docx"
+            | "eot"
+            | "gif"
+            | "gz"
+            | "ico"
+            | "jpeg"
+            | "jpg"
+            | "js"
+            | "json"
+            | "m4a"
+            | "m4v"
+            | "map"
+            | "mjs"
+            | "mov"
+            | "mp3"
+            | "mp4"
+            | "ogg"
+            | "otf"
+            | "pdf"
+            | "png"
+            | "ppt"
+            | "pptx"
+            | "rar"
+            | "svg"
+            | "tar"
+            | "tif"
+            | "tiff"
+            | "ttf"
+            | "txt"
+            | "wav"
+            | "wasm"
+            | "webmanifest"
+            | "webm"
+            | "webp"
+            | "woff"
+            | "woff2"
+            | "xls"
+            | "xlsx"
+            | "xml"
+            | "zip"
+    )
+}
+
+/// Resolve a screenshot path from a report row without ever leaving that
+/// report's own `screenshots` directory. SiteOne currently emits absolute
+/// paths, but a relative path is interpreted relative to the directory that
+/// contains `report.json` (for example, `screenshots/page.png`).
+fn resolve_screenshot_path(
+    report_path: &Path,
+    screenshot_dir: &Path,
+    raw_path: &str,
+) -> Option<PathBuf> {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+    let report_root = report_path.parent()?;
+    let canonical_report_root = canonical_path(report_root)?;
+    let expected_screenshot_dir = report_root.join("screenshots");
+    let canonical_expected_screenshot_dir = canonical_path(&expected_screenshot_dir)?;
+    let canonical_screenshot_dir = canonical_path(screenshot_dir)?;
+    // Keep the caller's directory tied to this report's size folder. This
+    // rejects a report row that points to another size's screenshots and also
+    // rejects a `screenshots` symlink that escapes the size folder.
+    if canonical_screenshot_dir != canonical_expected_screenshot_dir
+        || !canonical_screenshot_dir.starts_with(&canonical_report_root)
+    {
+        return None;
+    }
+
+    let raw = Path::new(raw_path);
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        report_root.join(raw)
+    };
+    let canonical_target = canonical_path(&candidate)?;
+    if !canonical_target.starts_with(&canonical_screenshot_dir) {
+        return None;
+    }
+    Some(canonical_target)
+}
+
+fn capture_item_for_path(path: &Path, viewport: &CaptureViewport) -> Option<CaptureItem> {
+    if image_mime_type(path).is_none() {
+        return None;
+    }
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let filename = path.file_name()?.to_str()?.to_string();
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    Some(CaptureItem {
+        path: path.to_string_lossy().to_string(),
+        filename,
+        bytes: metadata.len(),
+        modified_at,
+        size_id: Some(viewport.id.clone()),
+        size_label: Some(viewport.label.clone()),
+        width: Some(viewport.width),
+        height: Some(viewport.height),
+    })
+}
+
+fn filter_non_page_screenshots(
+    report_path: &Path,
+    screenshot_dir: &Path,
+) -> Result<usize, CrawlError> {
+    let metadata = fs::metadata(report_path).map_err(|error| CrawlError::Io(error.to_string()))?;
+    if metadata.len() > MAX_REPORT_LENGTH {
+        return Ok(0);
+    }
+    let data = fs::read(report_path).map_err(|error| CrawlError::Io(error.to_string()))?;
+    let report: serde_json::Value = serde_json::from_slice(&data)
+        .map_err(|error| CrawlError::Io(format!("JSONレポートを読み込めません: {}", error)))?;
+    let allowed_roots = [screenshot_dir.to_path_buf()];
+    let mut removed = 0;
+    for row in report_rows(&report, "browser-screenshots") {
+        let Some(raw_url) = row.get("url").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if is_page_screenshot_url(raw_url) {
+            continue;
+        }
+        let Some(raw_path) = row.get("path").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let path = PathBuf::from(raw_path);
+        if !is_path_allowed(&path, &allowed_roots) {
+            continue;
+        }
+        if fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn report_rows<'a>(
+    report: &'a serde_json::Value,
+    table_name: &str,
+) -> Vec<&'a serde_json::Map<String, serde_json::Value>> {
+    report
+        .get("tables")
+        .and_then(|tables| tables.get(table_name))
+        .and_then(|table| table.get("rows"))
+        .and_then(serde_json::Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(serde_json::Value::as_object)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn row_text(row: &serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        row.get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn report_url(base_url: &str, raw_url: &str) -> String {
+    if let Ok(url) = Url::parse(raw_url) {
+        return url.to_string();
+    }
+    Url::parse(base_url)
+        .ok()
+        .and_then(|base| base.join(raw_url).ok())
+        .map(|url| url.to_string())
+        .unwrap_or_else(|| raw_url.to_string())
+}
+
+fn remove_html_block(value: &str, tag: &str) -> String {
+    let lowered = value.to_ascii_lowercase();
+    let open = format!("<{}", tag);
+    let close = format!("</{}>", tag);
+    let mut output = String::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = lowered[cursor..].find(&open) {
+        let start = cursor + relative_start;
+        output.push_str(&value[cursor..start]);
+        let after_start = start + open.len();
+        let Some(relative_end) = lowered[after_start..].find(&close) else {
+            return output;
+        };
+        cursor = after_start + relative_end + close.len();
+    }
+    output.push_str(&value[cursor..]);
+    output
+}
+
+fn normalize_heading_text(value: &str) -> String {
+    let value = remove_html_block(&remove_html_block(value, "script"), "style");
+    let mut output = String::new();
+    let mut in_tag = false;
+    for ch in value.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => output.push(ch),
+            _ => {}
+        }
+    }
+    output
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+}
+
+fn extract_heading(value: &str, level: u8) -> Option<String> {
+    let lowered = value.to_ascii_lowercase();
+    let marker = format!("<h{}", level);
+    let mut search_from = 0;
+    while let Some(relative_start) = lowered[search_from..].find(&marker) {
+        let start = search_from + relative_start;
+        let Some(relative_end_tag) = lowered[start..].find('>') else {
+            break;
+        };
+        let content_start = start + relative_end_tag + 1;
+        let content_end = (1..=6)
+            .filter_map(|next_level| lowered[content_start..].find(&format!("<h{}", next_level)))
+            .map(|offset| content_start + offset)
+            .min()
+            .unwrap_or(value.len());
+        let text = normalize_heading_text(&value[content_start..content_end]);
+        if !text.is_empty() {
+            return Some(text);
+        }
+        search_from = content_start;
+    }
+    None
+}
+
+fn size_for_report_path<'a>(
+    path: &Path,
+    configured: &'a [CaptureViewport],
+) -> Option<&'a CaptureViewport> {
+    let size_slug = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    configured
+        .iter()
+        .find(|viewport| safe_size_slug(viewport) == size_slug)
+}
+
+fn ensure_seo_page(
+    pages: &mut HashMap<String, SeoPageItem>,
+    base_url: &str,
+    row: &serde_json::Map<String, serde_json::Value>,
+    size: Option<&CaptureViewport>,
+) -> Option<String> {
+    let raw_url = row_text(row, &["urlPathAndQuery", "url"])?;
+    let url = report_url(base_url, &raw_url);
+    let page = pages.entry(url.clone()).or_insert_with(|| SeoPageItem {
+        url: url.clone(),
+        ..SeoPageItem::default()
+    });
+    if let Some(viewport) = size {
+        if !page.size_ids.iter().any(|id| id == &viewport.id) {
+            page.size_ids.push(viewport.id.clone());
+        }
+        if !page
+            .size_labels
+            .iter()
+            .any(|label| label == &viewport.label)
+        {
+            page.size_labels.push(viewport.label.clone());
+        }
+    }
+    Some(url)
+}
+
+fn fill_if_missing(target: &mut Option<String>, value: Option<String>) {
+    if target.is_none() {
+        *target = value;
+    }
+}
+
+fn parse_seo_report(
+    path: &Path,
+    configured: &[CaptureViewport],
+) -> Result<Vec<SeoPageItem>, CrawlError> {
+    let metadata = fs::metadata(path).map_err(|error| CrawlError::Io(error.to_string()))?;
+    if metadata.len() > MAX_REPORT_LENGTH {
+        return Err(CrawlError::Io("SEOレポートが大きすぎます。".to_string()));
+    }
+    let data = fs::read(path).map_err(|error| CrawlError::Io(error.to_string()))?;
+    let report: serde_json::Value = serde_json::from_slice(&data)
+        .map_err(|error| CrawlError::Io(format!("SEOレポートを読み込めません: {}", error)))?;
+    let base_url = report
+        .pointer("/options/url")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let size = size_for_report_path(path, configured);
+    let mut pages = HashMap::<String, SeoPageItem>::new();
+
+    for row in report_rows(&report, "seo") {
+        if let Some(url) = ensure_seo_page(&mut pages, base_url, row, size) {
+            let page = pages.get_mut(&url).expect("SEO page was inserted");
+            fill_if_missing(&mut page.title, row_text(row, &["title"]));
+            fill_if_missing(&mut page.description, row_text(row, &["description"]));
+            fill_if_missing(
+                &mut page.canonical,
+                row_text(row, &["canonical", "canonicalUrl", "canonicalURL"]),
+            );
+            fill_if_missing(&mut page.h1, row_text(row, &["h1"]));
+            fill_if_missing(&mut page.status, row_text(row, &["indexing"]));
+        }
+    }
+    for row in report_rows(&report, "open-graph") {
+        if let Some(url) = ensure_seo_page(&mut pages, base_url, row, size) {
+            let page = pages.get_mut(&url).expect("SEO page was inserted");
+            fill_if_missing(&mut page.og_title, row_text(row, &["ogTitle"]));
+            fill_if_missing(&mut page.og_description, row_text(row, &["ogDescription"]));
+            fill_if_missing(&mut page.og_image, row_text(row, &["ogImage"]));
+            fill_if_missing(&mut page.twitter_title, row_text(row, &["twitterTitle"]));
+            fill_if_missing(
+                &mut page.twitter_description,
+                row_text(row, &["twitterDescription"]),
+            );
+            fill_if_missing(&mut page.twitter_image, row_text(row, &["twitterImage"]));
+        }
+    }
+    for row in report_rows(&report, "seo-headings") {
+        if let Some(url) = ensure_seo_page(&mut pages, base_url, row, size) {
+            let page = pages.get_mut(&url).expect("SEO page was inserted");
+            fill_if_missing(&mut page.h1, row_text(row, &["h1"]));
+            fill_if_missing(&mut page.h2, row_text(row, &["h2"]));
+            if page.h1.is_none() {
+                page.h1 = row_text(row, &["headings"]).and_then(|value| extract_heading(&value, 1));
+            }
+            if page.h2.is_none() {
+                page.h2 = row_text(row, &["headings"]).and_then(|value| extract_heading(&value, 2));
+            }
+        }
+    }
+    if let Some(results) = report.get("results").and_then(serde_json::Value::as_array) {
+        for result in results.iter().filter_map(serde_json::Value::as_object) {
+            if result.get("type").and_then(serde_json::Value::as_i64) != Some(1) {
+                continue;
+            }
+            let Some(raw_url) = row_text(result, &["url", "urlPathAndQuery"]) else {
+                continue;
+            };
+            if !is_page_screenshot_url(&raw_url) {
+                continue;
+            }
+            let Some(url) = ensure_seo_page(&mut pages, base_url, result, size) else {
+                continue;
+            };
+            let page = pages.get_mut(&url).expect("SEO result page was inserted");
+            fill_if_missing(&mut page.status, row_text(result, &["status"]));
+            let canonical = result
+                .get("extras")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|extras| row_text(extras, &["Canonical", "canonical", "canonicalUrl"]));
+            fill_if_missing(
+                &mut page.canonical,
+                canonical.map(|value| report_url(base_url, &value)),
+            );
+        }
+    }
+    if let Some(viewport) = size {
+        let Some(report_root) = path.parent() else {
+            return Ok(pages.into_values().collect());
+        };
+        let screenshot_dir = report_root.join("screenshots");
+        let mut ambiguous_captures = HashSet::<(String, String)>::new();
+        for row in report_rows(&report, "browser-screenshots") {
+            let Some(raw_url) = row_text(row, &["url"]) else {
+                continue;
+            };
+            if !is_page_screenshot_url(&raw_url) {
+                continue;
+            }
+            let Some(raw_path) = row_text(row, &["path"]) else {
+                continue;
+            };
+            let Some(capture_path) = resolve_screenshot_path(path, &screenshot_dir, &raw_path)
+            else {
+                continue;
+            };
+            let Some(capture) = capture_item_for_path(&capture_path, viewport) else {
+                continue;
+            };
+            let Some(url) = ensure_seo_page(&mut pages, base_url, row, size) else {
+                continue;
+            };
+            let key = (url.clone(), viewport.id.clone());
+            if ambiguous_captures.contains(&key) {
+                continue;
+            }
+            let page = pages.get_mut(&url).expect("screenshot page was inserted");
+            match page.capture_by_size.get(&viewport.id) {
+                None => {
+                    page.capture_by_size.insert(viewport.id.clone(), capture);
+                }
+                Some(existing) if existing.path == capture.path => {}
+                Some(_) => {
+                    page.capture_by_size.remove(&viewport.id);
+                    ambiguous_captures.insert(key);
+                }
+            }
+        }
+    }
+    Ok(pages.into_values().collect())
+}
+
+fn collect_report_files(
+    directory: &Path,
+    allowed_roots: &[PathBuf],
+    reports: &mut Vec<PathBuf>,
+) -> Result<(), CrawlError> {
+    let entries = fs::read_dir(directory).map_err(|error| CrawlError::Io(error.to_string()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_path_allowed(&path, allowed_roots) {
+            continue;
+        }
+        if path.is_dir() {
+            let hidden = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.starts_with('.'));
+            if !hidden {
+                collect_report_files(&path, allowed_roots, reports)?;
+            }
+        } else if path.file_name().and_then(|value| value.to_str()) == Some("report.json")
+            && is_path_allowed(&path, allowed_roots)
+        {
+            reports.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn list_seo_page_items(
+    root: &Path,
+    configured: &[CaptureViewport],
+    allowed_roots: &[PathBuf],
+) -> Result<Vec<SeoPageItem>, CrawlError> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut reports = Vec::new();
+    collect_report_files(root, allowed_roots, &mut reports)?;
+    reports.sort();
+    let mut pages = HashMap::<String, SeoPageItem>::new();
+    let mut ambiguous_captures = HashSet::<(String, String)>::new();
+    for report_path in reports {
+        let Ok(report_pages) = parse_seo_report(&report_path, configured) else {
+            continue;
+        };
+        for incoming in report_pages {
+            let page = pages.entry(incoming.url.clone()).or_default();
+            if page.url.is_empty() {
+                page.url = incoming.url.clone();
+            }
+            for (target, value) in [
+                (&mut page.title, incoming.title),
+                (&mut page.description, incoming.description),
+                (&mut page.canonical, incoming.canonical),
+                (&mut page.og_title, incoming.og_title),
+                (&mut page.og_description, incoming.og_description),
+                (&mut page.og_image, incoming.og_image),
+                (&mut page.twitter_title, incoming.twitter_title),
+                (&mut page.twitter_description, incoming.twitter_description),
+                (&mut page.twitter_image, incoming.twitter_image),
+                (&mut page.h1, incoming.h1),
+                (&mut page.h2, incoming.h2),
+                (&mut page.status, incoming.status),
+            ] {
+                fill_if_missing(target, value);
+            }
+            for id in incoming.size_ids {
+                if !page.size_ids.iter().any(|known| known == &id) {
+                    page.size_ids.push(id);
+                }
+            }
+            for label in incoming.size_labels {
+                if !page.size_labels.iter().any(|known| known == &label) {
+                    page.size_labels.push(label);
+                }
+            }
+            for (size_id, capture) in incoming.capture_by_size {
+                let key = (incoming.url.clone(), size_id.clone());
+                if ambiguous_captures.contains(&key) {
+                    continue;
+                }
+                match page.capture_by_size.get(&size_id) {
+                    None => {
+                        page.capture_by_size.insert(size_id, capture);
+                    }
+                    Some(existing) if existing.path == capture.path => {}
+                    Some(_) => {
+                        page.capture_by_size.remove(&size_id);
+                        ambiguous_captures.insert(key);
+                    }
+                }
+            }
+        }
+    }
+    let mut result = pages.into_values().collect::<Vec<_>>();
+    result.sort_by(|left, right| left.url.cmp(&right.url));
+    Ok(result)
+}
+
+fn read_configuration(path: &Path) -> Result<Option<CrawlConfiguration>, CrawlError> {
+    match fs::read(path) {
+        Ok(data) => serde_json::from_slice(&data)
+            .map(Some)
+            .map_err(|error| CrawlError::Configuration(error.to_string())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CrawlError::Configuration(error.to_string())),
+    }
+}
+
+#[tauri::command]
+fn load_configuration(app: AppHandle) -> Result<Option<CrawlConfiguration>, String> {
+    let path = config_path(&app).map_err(|error| error.to_string())?;
+    read_configuration(&path).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1143,7 +1852,8 @@ fn save_configuration(app: AppHandle, configuration: CrawlConfiguration) -> Resu
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
-    let data = serde_json::to_vec_pretty(&configuration).map_err(|error| error.to_string())?;
+    let data = serde_json::to_vec_pretty(&configuration.for_storage())
+        .map_err(|error| error.to_string())?;
     let mut file = File::create(path).map_err(|error| error.to_string())?;
     file.write_all(&data).map_err(|error| error.to_string())
 }
@@ -1198,32 +1908,45 @@ fn start_crawl(
         .map_err(|error| error.to_string())?;
     let enabled_count = configuration.enabled_captures().len();
     let run_captures = configuration.enabled_captures();
-    let base = expand_path(&configuration.output_root);
-    fs::create_dir_all(&base).map_err(|error| error.to_string())?;
     let url = Url::parse(configuration.target_url.trim())
         .map_err(|_| ValidationError::InvalidUrl.to_string())?;
-    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let base_run = base.join(format!(
-        "{}-{}",
-        sanitize_component(url.host_str().unwrap_or("website"), "website"),
-        timestamp
-    ));
-    let root = make_unique_run_root(&base_run);
-    fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-    let plans = output_plans_for_root(&root, &run_captures);
-    let run_id = root
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("run")
-        .to_string();
+    reserve_start(&state.runtime)?;
+    let setup = (|| -> Result<(PathBuf, PathBuf, Vec<OutputPlan>, String), String> {
+        let requested_base = expand_path(&configuration.output_root);
+        fs::create_dir_all(&requested_base).map_err(|error| error.to_string())?;
+        // Resolve aliases such as ~/Pictures -> /Volumes/... before passing paths
+        // to the sidecar. This keeps reports and child-process working directories
+        // on the actual mounted volume, which is also the path macOS protects.
+        let base = fs::canonicalize(&requested_base).unwrap_or(requested_base);
+        let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let base_run = base.join(format!(
+            "{}-{}",
+            sanitize_component(url.host_str().unwrap_or("website"), "website"),
+            timestamp
+        ));
+        let root = make_unique_run_root(&base_run);
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let plans = output_plans_for_root(&root, &run_captures);
+        let run_id = root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("run")
+            .to_string();
+        Ok((base, root, plans, run_id))
+    })();
+    let (base, root, plans, run_id) = match setup {
+        Ok(values) => values,
+        Err(error) => {
+            clear_start_reservation(&state.runtime);
+            return Err(error);
+        }
+    };
     {
         let mut guard = state
             .runtime
             .lock()
             .map_err(|_| "状態を更新できません".to_string())?;
-        if guard.status.phase.is_active() {
-            return Err(CrawlError::AlreadyRunning.to_string());
-        }
+        guard.start_in_progress = false;
         guard.cancel_requested = false;
         guard.log.clear();
         guard.status = CrawlStatus {
@@ -1297,12 +2020,39 @@ fn list_captures(
     let (allowed, configured) = state
         .runtime
         .lock()
-        .map(|guard| (guard.allowed_open_roots.clone(), guard.run_captures.clone()))
+        .map(|guard| {
+            (
+                guard.allowed_open_roots.clone(),
+                guard.status.run_captures.clone(),
+            )
+        })
         .map_err(|_| "パスの許可情報を読み込めません。".to_string())?;
     if !is_path_allowed(&root, &allowed) {
         return Err("実行で生成した保存先以外は列挙できません。".to_string());
     }
     list_capture_items(&root, &configured).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn list_seo_pages(
+    state: tauri::State<'_, AppState>,
+    root: String,
+) -> Result<Vec<SeoPageItem>, String> {
+    let root = expand_path(root.trim());
+    let (allowed, configured) = state
+        .runtime
+        .lock()
+        .map(|guard| {
+            (
+                guard.allowed_open_roots.clone(),
+                guard.status.run_captures.clone(),
+            )
+        })
+        .map_err(|_| "パスの許可情報を読み込めません。".to_string())?;
+    if !is_path_allowed(&root, &allowed) {
+        return Err("実行で生成した保存先以外はSEOレポートを読み込めません。".to_string());
+    }
+    list_seo_page_items(&root, &configured, &allowed).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -1455,6 +2205,7 @@ pub fn run() {
             start_crawl,
             stop_crawl,
             list_captures,
+            list_seo_pages,
             read_capture,
             read_capture_thumbnail,
             open_path,
@@ -1470,6 +2221,22 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_exit_code_keeps_running_separate_from_success_and_failure() {
+        for expected in [0, 7] {
+            // The pipe keeps the process running without depending on a sleep.
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", &format!("read input; exit {}", expected)])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            assert_eq!(child_exit_code(&mut child).unwrap(), None);
+            drop(child.stdin.take());
+            child.wait().unwrap();
+            assert_eq!(child_exit_code(&mut child).unwrap(), Some(expected));
+        }
+    }
 
     fn plan() -> OutputPlan {
         OutputPlan {
@@ -1493,7 +2260,70 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_dimensions_and_no_enabled_sizes() {
+    fn stored_configuration_omits_http_auth_password() {
+        let mut configuration = CrawlConfiguration::default();
+        configuration.http_auth_user = "user".into();
+        configuration.http_auth_password = "secret".into();
+        let stored = configuration.for_storage();
+        let json = serde_json::to_string(&stored).unwrap();
+        assert!(!json.contains("secret"));
+        assert!(json.contains("httpAuthUser"));
+    }
+
+    #[test]
+    fn configuration_reader_distinguishes_missing_valid_and_invalid_data() {
+        let root = std::env::temp_dir().join(format!(
+            "maho-crawl-configuration-reader-{}",
+            std::process::id()
+        ));
+        let path = root.join("configuration.json");
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(read_configuration(&path).unwrap(), None);
+
+        let expected = CrawlConfiguration::default();
+        std::fs::write(&path, serde_json::to_vec(&expected).unwrap()).unwrap();
+        assert_eq!(read_configuration(&path).unwrap(), Some(expected));
+
+        std::fs::write(&path, b"{not-json").unwrap();
+        assert!(read_configuration(&path).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn trims_log_at_a_utf8_boundary_with_japanese_and_ascii() {
+        let mut log = "あ".repeat(MAX_LOG_LENGTH / "あ".len());
+        log.push_str("ASCII");
+
+        trim_log_to_limit(&mut log);
+
+        assert!(log.len() <= MAX_LOG_LENGTH);
+        assert!(log.starts_with('あ'));
+        assert!(log.ends_with("ASCII"));
+    }
+
+    #[test]
+    fn start_reservation_rejects_duplicate_starts_and_can_be_released() {
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        reserve_start(&state).unwrap();
+        assert_eq!(
+            reserve_start(&state).unwrap_err(),
+            CrawlError::AlreadyRunning.to_string()
+        );
+        clear_start_reservation(&state);
+
+        {
+            let mut guard = state.lock().unwrap();
+            assert!(!guard.start_in_progress);
+            guard.status.phase = RunPhase::Running;
+        }
+        assert_eq!(
+            reserve_start(&state).unwrap_err(),
+            CrawlError::AlreadyRunning.to_string()
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_dimensions_but_allows_no_enabled_sizes() {
         let mut configuration = CrawlConfiguration::default();
         configuration.captures[1].width = 1440;
         configuration.captures[1].height = 900;
@@ -1506,10 +2336,9 @@ mod tests {
         for viewport in &mut configuration.captures {
             viewport.enabled = false;
         }
-        assert_eq!(
-            configuration.validate(),
-            Err(ValidationError::NoEnabledCaptureSize)
-        );
+        assert_eq!(configuration.validate(), Ok(()));
+        configuration.captures.clear();
+        assert_eq!(configuration.validate(), Ok(()));
     }
 
     #[test]
@@ -1528,7 +2357,7 @@ mod tests {
         configuration.max_depth = 3;
         let arguments = build_arguments(
             &configuration,
-            &configuration.captures[0],
+            Some(&configuration.captures[0]),
             &plan(),
             "Asia/Tokyo",
         )
@@ -1549,6 +2378,9 @@ mod tests {
             &"--http-cache-dir=/tmp/Maho Crawl/run/desktop-1440x900/.siteone-http-cache"
                 .to_string()
         ));
+        assert!(arguments.contains(
+            &"--extra-columns=Canonical=xpath://link[@rel='canonical']/@href(200>)".to_string()
+        ));
         assert!(arguments.contains(&"--screenshot-viewport=1440x900".to_string()));
         assert!(arguments.contains(&"--timezone=Asia/Tokyo".to_string()));
     }
@@ -1558,8 +2390,13 @@ mod tests {
         let mut configuration = CrawlConfiguration::default();
         configuration.single_page = true;
         configuration.max_depth = 9;
-        let arguments =
-            build_arguments(&configuration, &configuration.captures[0], &plan(), "UTC").unwrap();
+        let arguments = build_arguments(
+            &configuration,
+            Some(&configuration.captures[0]),
+            &plan(),
+            "UTC",
+        )
+        .unwrap();
         assert!(arguments.contains(&"--single-page".to_string()));
         assert!(!arguments
             .iter()
@@ -1567,10 +2404,63 @@ mod tests {
     }
 
     #[test]
+    fn http_auth_is_optional_and_emitted_as_stdin_flag() {
+        let mut configuration = CrawlConfiguration::default();
+        let arguments = build_arguments(
+            &configuration,
+            Some(&configuration.captures[0]),
+            &plan(),
+            "UTC",
+        )
+        .unwrap();
+        assert!(!arguments.iter().any(|argument| argument == "--http-auth-stdin"));
+
+        configuration.http_auth_user = " staging ".into();
+        configuration.http_auth_password = "p:ass word".into();
+        let arguments = build_arguments(
+            &configuration,
+            Some(&configuration.captures[0]),
+            &plan(),
+            "UTC",
+        )
+        .unwrap();
+        assert!(arguments.contains(&"--http-auth-stdin".to_string()));
+        assert_eq!(
+            configuration.http_auth_value().unwrap(),
+            Some("staging:p:ass word".to_string())
+        );
+        let stored = configuration.for_storage();
+        assert!(stored.http_auth_password.is_empty());
+
+        configuration.http_auth_user = "user:name".into();
+        assert_eq!(
+            configuration.validate(),
+            Err(ValidationError::InvalidHttpAuthUser)
+        );
+        configuration.http_auth_user = String::new();
+        configuration.http_auth_password = "secret".into();
+        assert_eq!(
+            configuration.validate(),
+            Err(ValidationError::MissingHttpAuthUser)
+        );
+        configuration.http_auth_user = "user".into();
+        configuration.http_auth_password = "secret\n".into();
+        assert_eq!(
+            configuration.validate(),
+            Err(ValidationError::InvalidHttpAuthValue)
+        );
+    }
+
+    #[test]
     fn only_supported_v251_options_are_emitted() {
         let configuration = CrawlConfiguration::default();
-        let arguments =
-            build_arguments(&configuration, &configuration.captures[0], &plan(), "UTC").unwrap();
+        let arguments = build_arguments(
+            &configuration,
+            Some(&configuration.captures[0]),
+            &plan(),
+            "UTC",
+        )
+        .unwrap();
         let supported: HashSet<&str> = [
             "--url",
             "--browser",
@@ -1588,12 +2478,14 @@ mod tests {
             "--output-html-report",
             "--output-json-file",
             "--output-text-file",
+            "--extra-columns",
             "--timezone",
             "--no-color",
             "--hide-progress-bar",
             "--single-page",
             "--max-depth",
             "--user-agent",
+            "--http-auth-stdin",
             "--browser-path",
             "--browser-auto-download",
         ]
@@ -1602,6 +2494,35 @@ mod tests {
         for argument in arguments {
             let option = argument.split('=').next().unwrap_or_default();
             assert!(supported.contains(option), "unsupported option: {}", option);
+        }
+    }
+
+    #[test]
+    fn metadata_only_crawl_has_one_report_plan_without_browser_or_screenshot_options() {
+        let mut configuration = CrawlConfiguration::default();
+        configuration.user_agent = "Metadata Checker".into();
+        configuration.browser_path = "/missing/browser".into();
+        configuration.auto_download_browser = true;
+        for capture in &mut configuration.captures {
+            capture.enabled = false;
+        }
+        for captures in [configuration.captures.clone(), Vec::new()] {
+            configuration.captures = captures;
+            let (_, plans) = make_output_plans(&configuration, UNIX_EPOCH).unwrap();
+            assert_eq!(plans.len(), 1);
+            let plan = &plans[0];
+            assert_eq!(plan.size_slug, "metadata");
+            assert!(plan.json_report.ends_with("metadata/report.json"));
+            let arguments = build_arguments(&configuration, None, plan, "Asia/Tokyo").unwrap();
+            assert!(!arguments
+                .iter()
+                .any(|argument| argument.starts_with("--browser")
+                    || argument.starts_with("--screenshot")));
+            assert!(arguments.contains(&format!("--output-json-file={}", plan.json_report)));
+            assert!(arguments.contains(&format!("--output-html-report={}", plan.html_report)));
+            assert!(arguments.contains(&format!("--output-text-file={}", plan.text_report)));
+            assert!(arguments.contains(&"--max-depth=2".to_string()));
+            assert!(arguments.contains(&"--user-agent=Metadata Checker!".to_string()));
         }
     }
 
@@ -1670,6 +2591,303 @@ mod tests {
             vec!["one.png", "two.webp"]
         );
         assert_eq!(items[0].size_id.as_deref(), Some("desktop"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn page_screenshot_url_filter_excludes_known_static_resources() {
+        assert!(is_page_screenshot_url("https://example.test/about"));
+        assert!(is_page_screenshot_url("https://example.test/about.html"));
+        assert!(is_page_screenshot_url(
+            "https://example.test/about?view=mobile"
+        ));
+        assert!(!is_page_screenshot_url(
+            "https://example.test/assets/fonts/site.woff2?v=1"
+        ));
+        assert!(!is_page_screenshot_url(
+            "https://example.test/assets/images/logo.svg"
+        ));
+        assert!(!is_page_screenshot_url(
+            "https://example.test/assets/app.js?v=1"
+        ));
+    }
+
+    #[test]
+    fn non_page_screenshot_filter_removes_only_reported_static_resources() {
+        let root = std::env::temp_dir().join(format!(
+            "maho-crawl-screenshot-filter-{}",
+            std::process::id()
+        ));
+        let screenshot_dir = root.join("screenshots");
+        let report_path = root.join("report.json");
+        std::fs::create_dir_all(&screenshot_dir).unwrap();
+        let page = screenshot_dir.join("page.png");
+        let font = screenshot_dir.join("font.png");
+        let unknown = screenshot_dir.join("unknown.png");
+        std::fs::write(&page, [0_u8, 1]).unwrap();
+        std::fs::write(&font, [0_u8, 1]).unwrap();
+        std::fs::write(&unknown, [0_u8, 1]).unwrap();
+        let report = serde_json::json!({
+            "tables": {
+                "browser-screenshots": {
+                    "rows": [
+                        { "path": page.to_string_lossy(), "url": "https://example.test/about" },
+                        { "path": font.to_string_lossy(), "url": "https://example.test/assets/site.woff2" },
+                        { "path": unknown.to_string_lossy(), "url": "https://example.test/assets/custom.page" }
+                    ]
+                }
+            }
+        });
+        std::fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+
+        assert_eq!(
+            filter_non_page_screenshots(&report_path, &screenshot_dir).unwrap(),
+            1
+        );
+        assert!(page.exists());
+        assert!(!font.exists());
+        assert!(unknown.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn seo_report_parser_merges_sizes_and_extracts_safe_standard_fields() {
+        let root = std::env::temp_dir().join(format!("maho-crawl-seo-{}", std::process::id()));
+        let desktop = root.join("desktop-1440x900");
+        let tablet = root.join("tablet-768x1024");
+        std::fs::create_dir_all(&desktop).unwrap();
+        std::fs::create_dir_all(&tablet).unwrap();
+        let report = |title: &str| {
+            serde_json::json!({
+                "options": { "url": "https://example.test/" },
+            "tables": {
+                    "seo": { "rows": [{
+                        "urlPathAndQuery": "/about?from=report",
+                        "title": title,
+                        "description": "Description",
+                        "h1": "Heading one",
+                        "indexing": "Allowed"
+                    }] },
+                    "open-graph": { "rows": [{
+                        "urlPathAndQuery": "/about?from=report",
+                        "ogTitle": "OG title",
+                        "ogDescription": "OG description",
+                        "ogImage": "https://example.test/og.png",
+                        "twitterTitle": "Twitter title"
+                    }] },
+                    "seo-headings": { "rows": [{
+                        "urlPathAndQuery": "/about?from=report",
+                        "headings": "<h1> Heading one <h2> Heading two <script>ignored</script>"
+                    }] }
+                },
+                "results": [{
+                    "url": "https://example.test/about?from=report",
+                    "type": 1,
+                    "status": "200",
+                    "extras": { "Canonical": "https://example.test/about" }
+                }, {
+                    "url": "https://example.test/not-in-standard-tables",
+                    "type": 1,
+                    "status": "204"
+                }, {
+                    "url": "https://example.test/assets/site.woff2",
+                    "type": 1,
+                    "status": "404"
+                }]
+            })
+        };
+        std::fs::write(
+            desktop.join("report.json"),
+            serde_json::to_vec(&report("Desktop title")).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            tablet.join("report.json"),
+            serde_json::to_vec(&report("Tablet title")).unwrap(),
+        )
+        .unwrap();
+
+        let pages = list_seo_page_items(
+            &root,
+            &CrawlConfiguration::default().captures,
+            &[root.clone()],
+        )
+        .unwrap();
+        assert_eq!(pages.len(), 2);
+        let page = pages
+            .iter()
+            .find(|page| page.url.ends_with("/about?from=report"))
+            .unwrap();
+        assert_eq!(page.url, "https://example.test/about?from=report");
+        assert_eq!(page.title.as_deref(), Some("Desktop title"));
+        assert_eq!(page.description.as_deref(), Some("Description"));
+        assert_eq!(
+            page.canonical.as_deref(),
+            Some("https://example.test/about")
+        );
+        assert_eq!(page.og_title.as_deref(), Some("OG title"));
+        assert_eq!(page.twitter_title.as_deref(), Some("Twitter title"));
+        assert_eq!(page.h1.as_deref(), Some("Heading one"));
+        assert_eq!(page.h2.as_deref(), Some("Heading two"));
+        assert_eq!(page.size_ids, vec!["desktop", "tablet"]);
+        assert_eq!(page.status.as_deref(), Some("Allowed"));
+        let tableless_page = pages
+            .iter()
+            .find(|page| page.url.ends_with("/not-in-standard-tables"))
+            .unwrap();
+        assert_eq!(tableless_page.title, None);
+        assert_eq!(tableless_page.status.as_deref(), Some("204"));
+        assert_eq!(tableless_page.size_ids, vec!["desktop", "tablet"]);
+        assert!(!pages
+            .iter()
+            .any(|page| page.url.ends_with("/assets/site.woff2")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn seo_report_parser_maps_page_captures_by_viewport_id_and_serializes_contract() {
+        let root =
+            std::env::temp_dir().join(format!("maho-crawl-seo-captures-{}", std::process::id()));
+        let wide = CaptureViewport::new("wide", "Same label", 1440, 900);
+        let narrow = CaptureViewport::new("narrow", "Same label", 768, 1024);
+        let configured = vec![wide.clone(), narrow.clone()];
+        let wide_root = root.join(safe_size_slug(&wide));
+        let narrow_root = root.join(safe_size_slug(&narrow));
+        let wide_screenshots = wide_root.join("screenshots");
+        let narrow_screenshots = narrow_root.join("screenshots");
+        std::fs::create_dir_all(&wide_screenshots).unwrap();
+        std::fs::create_dir_all(&narrow_screenshots).unwrap();
+
+        let wide_about = wide_screenshots.join("about-wide.png");
+        let wide_child = wide_screenshots.join("child-wide.jpg");
+        let narrow_about = narrow_screenshots.join("about-narrow.webp");
+        let narrow_child = narrow_screenshots.join("child-narrow.png");
+        let outside = root.join("outside.png");
+        let static_resource = wide_screenshots.join("font.png");
+        std::fs::write(&wide_about, [1_u8, 2, 3]).unwrap();
+        std::fs::write(&wide_child, [4_u8, 5]).unwrap();
+        std::fs::write(&narrow_about, [6_u8, 7, 8, 9]).unwrap();
+        std::fs::write(&narrow_child, [10_u8]).unwrap();
+        std::fs::write(&outside, [11_u8]).unwrap();
+        std::fs::write(&static_resource, [12_u8]).unwrap();
+
+        let report = |title: &str, screenshot_rows: Vec<serde_json::Value>| {
+            serde_json::json!({
+                "options": { "url": "https://example.test:8443/base/" },
+                "tables": {
+                    "seo": { "rows": [
+                        {
+                            "urlPathAndQuery": "/parent/about?from=report",
+                            "title": title,
+                            "indexing": "Allowed"
+                        },
+                        {
+                            "urlPathAndQuery": "/parent/child?from=report",
+                            "title": "Child title"
+                        }
+                    ] },
+                    "browser-screenshots": { "rows": screenshot_rows }
+                },
+                "results": [{
+                    "url": "https://example.test:8443/parent/child?from=report",
+                    "type": 1,
+                    "status": "200"
+                }]
+            })
+        };
+        let wide_report = report(
+            "Wide title",
+            vec![
+                serde_json::json!({
+                    "url": "https://example.test:8443/parent/about?from=report",
+                    "path": "screenshots/about-wide.png"
+                }),
+                serde_json::json!({
+                    "url": "https://example.test:8443/parent/child?from=report",
+                    "path": wide_child.to_string_lossy()
+                }),
+                serde_json::json!({
+                    "url": "https://example.test:8443/assets/site.woff2",
+                    "path": static_resource.to_string_lossy()
+                }),
+                serde_json::json!({
+                    "url": "https://example.test:8443/parent/about?from=report",
+                    "path": "../outside.png"
+                }),
+                serde_json::json!({
+                    "url": "https://example.test:8443/parent/child?from=report",
+                    "path": "screenshots/missing.png"
+                }),
+            ],
+        );
+        let narrow_report = report(
+            "Narrow title",
+            vec![
+                serde_json::json!({
+                    "url": "https://example.test:8443/parent/about?from=report",
+                    "path": narrow_about.to_string_lossy()
+                }),
+                serde_json::json!({
+                    "url": "https://example.test:8443/parent/child?from=report",
+                    "path": narrow_child.to_string_lossy()
+                }),
+            ],
+        );
+        std::fs::write(
+            wide_root.join("report.json"),
+            serde_json::to_vec(&wide_report).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            narrow_root.join("report.json"),
+            serde_json::to_vec(&narrow_report).unwrap(),
+        )
+        .unwrap();
+
+        let pages = list_seo_page_items(&root, &configured, &[root.clone()]).unwrap();
+        assert_eq!(pages.len(), 2);
+        let about = pages
+            .iter()
+            .find(|page| page.url.ends_with("/parent/about?from=report"))
+            .unwrap();
+        let child = pages
+            .iter()
+            .find(|page| page.url.ends_with("/parent/child?from=report"))
+            .unwrap();
+        assert_eq!(
+            about.url,
+            "https://example.test:8443/parent/about?from=report"
+        );
+        assert_eq!(about.size_ids, vec!["wide", "narrow"]);
+        assert_eq!(about.size_labels, vec!["Same label"]);
+        assert_eq!(about.capture_by_size.len(), 2);
+        assert_eq!(about.capture_by_size["wide"].filename, "about-wide.png");
+        assert_eq!(
+            about.capture_by_size["narrow"].filename,
+            "about-narrow.webp"
+        );
+        assert_eq!(child.capture_by_size.len(), 2);
+        assert_eq!(child.capture_by_size["wide"].filename, "child-wide.jpg");
+        assert_eq!(child.capture_by_size["narrow"].filename, "child-narrow.png");
+        assert_eq!(
+            child.capture_by_size["wide"].size_label.as_deref(),
+            Some("Same label")
+        );
+        assert!(!pages
+            .iter()
+            .any(|page| page.url.ends_with("/assets/site.woff2")));
+
+        let serialized = serde_json::to_value(about).unwrap();
+        let captures = serialized
+            .get("captureBySize")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert_eq!(captures["wide"]["sizeId"], "wide");
+        assert_eq!(captures["wide"]["sizeLabel"], "Same label");
+        assert_eq!(captures["wide"]["width"], 1440);
+        assert_eq!(captures["narrow"]["sizeId"], "narrow");
+        assert_eq!(captures["narrow"]["height"], 1024);
+
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "build:siteone": "bash scripts/build-siteone-custom.sh",
+    "build:app": "tauri build --bundles app && bash scripts/copy-macos-app.sh",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",

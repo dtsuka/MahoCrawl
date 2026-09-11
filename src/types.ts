@@ -3,6 +3,7 @@ export type ScreenshotFormat = 'png' | 'jpg' | 'webp'
 export type BrowserWait = 'networkidle' | 'load' | 'domcontentloaded'
 export type RunPhase = 'idle' | 'running' | 'cancelling' | 'succeeded' | 'cancelled' | 'failed'
 export type CaptureSortOrder = 'newest' | 'name' | 'size'
+export type GalleryView = 'grid' | 'list'
 
 export interface CaptureViewport {
   id: string
@@ -16,6 +17,8 @@ export interface CrawlConfiguration {
   targetUrl: string
   singlePage: boolean
   userAgent: string
+  httpAuthUser: string
+  httpAuthPassword: string
   screenshotMode: ScreenshotMode
   screenshotFormat: ScreenshotFormat
   hideCookieBanner: boolean
@@ -71,6 +74,25 @@ export interface CaptureImage {
   dataBase64: string
 }
 
+export interface SeoPageItem {
+  url: string
+  title: string | null
+  description: string | null
+  canonical: string | null
+  ogTitle: string | null
+  ogDescription: string | null
+  ogImage: string | null
+  twitterTitle: string | null
+  twitterDescription: string | null
+  twitterImage: string | null
+  h1: string | null
+  h2: string | null
+  sizeIds: string[]
+  sizeLabels: string[]
+  captureBySize?: Record<string, CaptureItem>
+  status: string | null
+}
+
 export interface StartResponse {
   runId: string
   root: string
@@ -81,6 +103,8 @@ export const DEFAULT_CONFIGURATION: CrawlConfiguration = {
   targetUrl: 'https://example.com',
   singlePage: false,
   userAgent: '',
+  httpAuthUser: '',
+  httpAuthPassword: '',
   screenshotMode: 'full-page',
   screenshotFormat: 'png',
   hideCookieBanner: true,
@@ -102,6 +126,12 @@ export const DEFAULT_CONFIGURATION: CrawlConfiguration = {
 
 export function cloneConfiguration(configuration: CrawlConfiguration): CrawlConfiguration {
   return JSON.parse(JSON.stringify(configuration)) as CrawlConfiguration
+}
+
+export function sanitizeConfigurationForStorage(configuration: CrawlConfiguration): CrawlConfiguration {
+  const stored = cloneConfiguration(configuration)
+  stored.httpAuthPassword = ''
+  return stored
 }
 
 export function safeSizeSlug(viewport: CaptureViewport): string {
@@ -136,6 +166,33 @@ export function filterAndSortCaptures(items: CaptureItem[], filter: string, sort
   })
 }
 
+function isIntegerInRange(value: unknown, minimum: number, maximum: number): value is number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && Number.isInteger(value)
+    && value >= minimum
+    && value <= maximum
+}
+
+function containsDisallowedAuthChar(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0)
+    return code <= 0x1f || code === 0x7f
+  })
+}
+
+function validateHttpAuth(configuration: CrawlConfiguration): string | null {
+  const user = configuration.httpAuthUser.trim()
+  const password = configuration.httpAuthPassword
+  if (!user && !password) return null
+  if (!user) return 'Basic認証のユーザー名を入力してください。'
+  if (user.includes(':')) return 'Basic認証のユーザー名にコロンは使えません。'
+  if (containsDisallowedAuthChar(user) || containsDisallowedAuthChar(password)) {
+    return 'Basic認証に使用できない文字が含まれています。'
+  }
+  return null
+}
+
 export function validateConfiguration(configuration: CrawlConfiguration): string[] {
   const errors: string[] = []
   try {
@@ -144,12 +201,13 @@ export function validateConfiguration(configuration: CrawlConfiguration): string
   } catch {
     errors.push('http または https で始まる有効なURLを入力してください。')
   }
+  const httpAuthError = validateHttpAuth(configuration)
+  if (httpAuthError) errors.push(httpAuthError)
   if (!configuration.outputRoot.trim()) errors.push('保存先フォルダを指定してください。')
-  if (configuration.maxDepth < 0 || configuration.maxDepth > 20) errors.push('クロール深度は0〜20で指定してください。')
-  if (configuration.workers < 1 || configuration.workers > 16 || configuration.browserWorkers < 1 || configuration.browserWorkers > 8) errors.push('同時処理数が範囲外です。')
-  if (configuration.maxRequestsPerSecond < 1 || configuration.maxRequestsPerSecond > 100) errors.push('1秒あたりの最大リクエスト数は1〜100で指定してください。')
-  if (configuration.browserTimeout < 5 || configuration.browserTimeout > 300) errors.push('ブラウザのタイムアウトは5〜300秒で指定してください。')
-  if (configuration.captures.length === 0) errors.push('キャプチャサイズを1件以上登録してください。')
+  if (!isIntegerInRange(configuration.maxDepth, 0, 20)) errors.push('クロール深度は0〜20で指定してください。')
+  if (!isIntegerInRange(configuration.workers, 1, 16) || !isIntegerInRange(configuration.browserWorkers, 1, 8)) errors.push('同時処理数が範囲外です。')
+  if (!isIntegerInRange(configuration.maxRequestsPerSecond, 1, 100)) errors.push('1秒あたりの最大リクエスト数は1〜100で指定してください。')
+  if (!isIntegerInRange(configuration.browserTimeout, 5, 300)) errors.push('ブラウザのタイムアウトは5〜300秒で指定してください。')
   const ids = new Set<string>()
   const dimensions = new Set<string>()
   for (const viewport of configuration.captures) {
@@ -157,11 +215,10 @@ export function validateConfiguration(configuration: CrawlConfiguration): string
     if (!viewport.id.trim()) errors.push('キャプチャサイズIDが不正です。')
     if (ids.has(viewport.id.trim())) errors.push('キャプチャサイズIDが重複しています。')
     ids.add(viewport.id.trim())
-    if (viewport.width < 320 || viewport.width > 8192 || viewport.height < 320 || viewport.height > 8192) errors.push('画面サイズは幅・高さとも320〜8192pxで指定してください。')
+    if (!isIntegerInRange(viewport.width, 320, 8192) || !isIntegerInRange(viewport.height, 320, 8192)) errors.push('画面サイズは幅・高さとも320〜8192pxで指定してください。')
     const dimension = `${viewport.width}x${viewport.height}`
     if (dimensions.has(dimension)) errors.push('キャプチャサイズの幅・高さが重複しています。')
     dimensions.add(dimension)
   }
-  if (!configuration.captures.some((viewport) => viewport.enabled)) errors.push('有効なキャプチャサイズを1件以上残してください。')
   return [...new Set(errors)]
 }

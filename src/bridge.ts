@@ -1,11 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { CaptureImage, CaptureItem, CrawlConfiguration, CrawlStatus, StartResponse } from './types'
+import type { CaptureImage, CaptureItem, CrawlConfiguration, CrawlStatus, SeoPageItem, StartResponse } from './types'
 
 export const isTauri = Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
 
-export async function loadConfiguration(): Promise<CrawlConfiguration> {
-  return invoke<CrawlConfiguration>('load_configuration')
+export async function loadConfiguration(): Promise<CrawlConfiguration | null> {
+  return invoke<CrawlConfiguration | null>('load_configuration')
 }
 
 export async function saveConfiguration(configuration: CrawlConfiguration): Promise<void> {
@@ -38,6 +38,10 @@ export async function stopCrawl(): Promise<void> {
 
 export async function listCaptures(root: string, configuration: CrawlConfiguration): Promise<CaptureItem[]> {
   return invoke<CaptureItem[]>('list_captures', { root, configuration })
+}
+
+export async function listSeoPages(root: string): Promise<SeoPageItem[]> {
+  return invoke<SeoPageItem[]>('list_seo_pages', { root })
 }
 
 export async function openPath(path: string): Promise<void> {
