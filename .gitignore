@@ -1,5 +1,8 @@
 node_modules/
 dist/
+release/
+tmp/
+.siteone-build/
 .vite/
 src-tauri/target/
 src-tauri/gen/
