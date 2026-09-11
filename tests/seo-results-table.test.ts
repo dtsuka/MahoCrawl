@@ -1,0 +1,99 @@
+import { mount } from '@vue/test-utils'
+import { describe, expect, it } from 'vitest'
+import SeoResultsTable from '../src/components/SeoResultsTable.vue'
+import type { CaptureItem, CaptureViewport, SeoPageItem } from '../src/types'
+
+function capture(sizeId: string, overrides: Partial<CaptureItem> = {}): CaptureItem {
+  return {
+    path: `/captures/page-${sizeId}.png`,
+    filename: `page-${sizeId}.png`,
+    bytes: 1200,
+    modifiedAt: 10,
+    sizeId,
+    sizeLabel: null,
+    width: 1440,
+    height: 900,
+    ...overrides,
+  }
+}
+
+function page(overrides: Partial<SeoPageItem> = {}): SeoPageItem {
+  return {
+    url: 'https://example.test/long',
+    title: '長いタイトル',
+    description: '説明の一行目\n説明の二行目。これは詳細パネルで全文を確認できます。',
+    canonical: 'https://example.test/long',
+    ogTitle: 'OGPタイトル',
+    ogDescription: 'OGPの詳細説明',
+    ogImage: 'https://cdn.example.test/og.png',
+    twitterTitle: 'Twitterタイトル',
+    twitterDescription: 'Twitterの詳細説明',
+    twitterImage: 'https://cdn.example.test/twitter.png',
+    h1: '見出し1',
+    h2: '見出し2',
+    sizeIds: ['desktop', 'mobile'],
+    sizeLabels: ['同名サイズ', '同名サイズ'],
+    captureBySize: {
+      desktop: capture('desktop', { sizeLabel: 'キャプチャDesktop' }),
+      mobile: capture('mobile', { sizeLabel: 'キャプチャMobile', width: 390, height: 844 }),
+    },
+    status: 'Allowed',
+    ...overrides,
+  }
+}
+
+const sizes: CaptureViewport[] = [
+  { id: 'desktop', label: '設定Desktop', width: 1440, height: 900, enabled: true },
+  { id: 'mobile', label: '設定Mobile', width: 390, height: 844, enabled: true },
+]
+
+describe('SeoResultsTable', () => {
+  it('keeps one main row, preserves size id order, and emits the clicked button as opener', async () => {
+    const target = page()
+    const wrapper = mount(SeoResultsTable, { props: { pages: [target], sizes } })
+
+    expect(wrapper.findAll('tbody > tr.result-row')).toHaveLength(1)
+    const buttons = wrapper.findAll<HTMLButtonElement>('button.size-button')
+    expect(buttons).toHaveLength(2)
+    expect(buttons.map((button) => button.text())).toEqual(['キャプチャDesktop', 'キャプチャMobile'])
+
+    await buttons[1].trigger('click')
+    const emitted = wrapper.emitted('open-capture')
+    expect(emitted).toHaveLength(1)
+    expect(emitted?.[0]).toEqual([target, 'mobile', buttons[1].element])
+
+    wrapper.unmount()
+  })
+
+  it('expands a selectable full-text detail row and distinguishes missing values', async () => {
+    const target = page({
+      title: null,
+      description: '長文の説明\n二行目も読める本文',
+      canonical: null,
+      ogDescription: null,
+      twitterImage: null,
+      h2: null,
+    })
+    const wrapper = mount(SeoResultsTable, { props: { pages: [target], sizes } })
+    const toggle = wrapper.find<HTMLButtonElement>('button.detail-toggle')
+
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.attributes('aria-controls')).toBe('seo-detail-0')
+    expect(wrapper.findAll('tbody > tr.result-row')).toHaveLength(1)
+    expect(wrapper.find('.detail-row').exists()).toBe(false)
+
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.findAll('tbody > tr.result-row')).toHaveLength(1)
+    expect(wrapper.find('.detail-row').exists()).toBe(true)
+    expect(wrapper.find('.detail-panel').text()).toContain('長文の説明\n二行目も読める本文')
+    expect(wrapper.find('.detail-panel').text()).toContain('Canonical未取得')
+    expect(wrapper.find('.detail-panel').text()).toContain('twitter:image未取得')
+    expect(wrapper.find('.detail-panel dd').attributes('class')).toBeDefined()
+
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(wrapper.find('.detail-row').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})

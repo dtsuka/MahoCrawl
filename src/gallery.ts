@@ -1,0 +1,171 @@
+import type { CaptureItem, SeoPageItem } from './types'
+
+/**
+ * Fields that are useful when looking for a page in either gallery view.
+ *
+ * Keep this list explicit: a capture is associated with a page only when the
+ * page's `captureBySize` map says so.  In particular, do not infer a page
+ * from a filename or URL slug.
+ */
+function pageSearchText(page: SeoPageItem, includeSizeLabels = false): string {
+  const fields: Array<string | null | undefined> = [
+    page.url,
+    page.title,
+    page.description,
+    page.canonical,
+    page.ogTitle,
+    page.ogDescription,
+    page.ogImage,
+    page.twitterTitle,
+    page.twitterDescription,
+    page.twitterImage,
+    page.h1,
+    page.h2,
+  ]
+  if (includeSizeLabels) fields.push(...page.sizeLabels)
+  return fields.filter((field): field is string => typeof field === 'string' && field.length > 0).join('\u0000')
+}
+
+/**
+ * Normalise user-visible text for matching. NFKC makes full-width Latin
+ * characters and spaces behave like their ordinary equivalents while
+ * preserving Japanese text. The query itself is never treated as a regex.
+ */
+function normalizeSearchText(value: string): string {
+  return value.normalize('NFKC').toLocaleLowerCase('en-US')
+}
+
+function queryTerms(query: string): string[] {
+  const normalized = normalizeSearchText(query).trim()
+  return normalized ? normalized.split(/\s+/u).filter(Boolean) : []
+}
+
+function matchesAllTerms(text: string, terms: string[]): boolean {
+  if (terms.length === 0) return true
+  const normalizedText = normalizeSearchText(text)
+  return terms.every((term) => normalizedText.includes(term))
+}
+
+/**
+ * Return a stable key for a capture that appears in an explicit
+ * `captureBySize` entry. Real captures use their path. Browser/demo captures
+ * can intentionally have no path, so those use filename + size id instead.
+ */
+function captureKey(capture: CaptureItem, sizeIdHint?: string): string | null {
+  if (capture.path.length > 0) return `path\u0000${capture.path}`
+
+  const filename = capture.filename
+  const sizeId = sizeIdHint || capture.sizeId || ''
+  if (!filename || !sizeId) return null
+  return `filename\u0000${filename}\u0000${sizeId}`
+}
+
+/**
+ * Build the capture -> page text index once per search. This keeps a search
+ * from repeatedly walking every page for every capture.
+ */
+function buildCapturePageIndex(pages: SeoPageItem[]): Map<string, string> {
+  const index = new Map<string, string>()
+
+  for (const page of pages) {
+    const mappings = page.captureBySize
+    if (!mappings) continue
+    const searchablePage = pageSearchText(page)
+    for (const [sizeId, mappedCapture] of Object.entries(mappings)) {
+      if (!mappedCapture) continue
+      const key = captureKey(mappedCapture, sizeId)
+      if (!key) continue
+      const previous = index.get(key)
+      // Multiple explicit mappings are retained in the searchable text. This
+      // does not guess an association; it reflects all explicit entries.
+      index.set(key, previous ? `${previous}\u0000${searchablePage}` : searchablePage)
+    }
+  }
+
+  return index
+}
+
+/**
+ * Search captures by their own filename/size label and metadata from pages
+ * explicitly mapped through `captureBySize`.
+ */
+export function searchCaptures(items: CaptureItem[], pages: SeoPageItem[], query: string): CaptureItem[] {
+  const terms = queryTerms(query)
+  if (terms.length === 0) return [...items]
+
+  const pageIndex = buildCapturePageIndex(pages)
+  return items.filter((capture) => {
+    const key = captureKey(capture)
+    const mappedPage = key ? pageIndex.get(key) || '' : ''
+    const captureText = [capture.filename, capture.sizeLabel, mappedPage]
+      .filter((field): field is string => typeof field === 'string' && field.length > 0)
+      .join('\u0000')
+    return matchesAllTerms(captureText, terms)
+  })
+}
+
+/** Search SEO pages by page metadata and configured capture size labels. */
+export function searchSeoPages(pages: SeoPageItem[], query: string): SeoPageItem[] {
+  const terms = queryTerms(query)
+  if (terms.length === 0) return [...pages]
+
+  return pages.filter((page) => matchesAllTerms(pageSearchText(page, true), terms))
+}
+
+export type SeoPageSortOrder = 'url' | 'title' | 'newest'
+
+function sortText(value: string): string {
+  return normalizeSearchText(value.trim())
+}
+
+function compareText(left: string, right: string): number {
+  const normalizedLeft = sortText(left)
+  const normalizedRight = sortText(right)
+  return normalizedLeft.localeCompare(normalizedRight, 'ja', { numeric: true, sensitivity: 'base' })
+    || left.localeCompare(right, 'ja', { numeric: true })
+}
+
+function titleSortValue(page: SeoPageItem): string {
+  return page.title?.trim() || page.url
+}
+
+function latestModifiedAt(page: SeoPageItem): number | null {
+  let latest: number | null = null
+  for (const capture of Object.values(page.captureBySize ?? {})) {
+    if (!capture || !Number.isFinite(capture.modifiedAt)) continue
+    if (latest === null || capture.modifiedAt > latest) latest = capture.modifiedAt
+  }
+  return latest
+}
+
+/**
+ * Sort SEO pages without mutating the source array.
+ *
+ * Missing titles consistently fall back to the page URL. For newest order,
+ * pages with no valid mapped capture timestamp are placed after dated pages;
+ * URL is the deterministic tie-breaker in every order.
+ */
+export function sortSeoPages(pages: SeoPageItem[], order: SeoPageSortOrder): SeoPageItem[] {
+  return pages
+    .map((page, index) => ({ page, index, modifiedAt: latestModifiedAt(page) }))
+    .sort((left, right) => {
+      let comparison = 0
+      if (order === 'newest') {
+        if (left.modifiedAt === null && right.modifiedAt !== null) return 1
+        if (left.modifiedAt !== null && right.modifiedAt === null) return -1
+        if (left.modifiedAt !== null && right.modifiedAt !== null) {
+          comparison = right.modifiedAt - left.modifiedAt
+        }
+      } else if (order === 'title') {
+        comparison = compareText(titleSortValue(left.page), titleSortValue(right.page))
+      } else {
+        comparison = compareText(left.page.url, right.page.url)
+      }
+
+      if (comparison !== 0) return comparison
+      if (order === 'title' || order === 'newest') comparison = compareText(left.page.url, right.page.url)
+      if (comparison !== 0) return comparison
+      return left.index - right.index
+    })
+    .map(({ page }) => page)
+}
