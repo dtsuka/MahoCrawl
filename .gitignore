@@ -1,11 +1,38 @@
+# 依存関係・ビルド成果物
 node_modules/
 dist/
+dist-ssr/
 release/
 tmp/
 .siteone-build/
 .vite/
+coverage/
+
+# Tauri / Rust
 src-tauri/target/
 src-tauri/gen/
 src-tauri/.tauri/
+
+# 環境変数・署名鍵・証明書（公開リポジトリに載せない）
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.p8
+*.key
+*.mobileprovision
+AuthKey_*.p8
+
+# 配布物が作業ツリーに残った場合
+*.app
+*.dmg
+*.pkg
+
+# エディタ・OS
+.cursor/
+.idea/
+*.local
 *.log
 .DS_Store
+Thumbs.db
