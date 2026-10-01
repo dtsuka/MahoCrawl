@@ -81,7 +81,12 @@ for target in "${targets[@]}"; do
 
   printf 'ビルド中: %s\n' "$target"
   # 配布バイナリにローカルの絶対パスを残さない
-  bash "$project_root/scripts/with-remapped-paths.sh" cargo build --manifest-path "$siteone_dir/Cargo.toml" --release "${lock_args[@]}" "${build_target[@]/#/--target }"
+  # --target とトリプルは別々の引数として渡す（1つの文字列にすると cargo が解釈できない）
+  target_args=()
+  if ((${#build_target[@]})); then
+    target_args=(--target "$target")
+  fi
+  bash "$project_root/scripts/with-remapped-paths.sh" cargo build --manifest-path "$siteone_dir/Cargo.toml" --release ${lock_args[@]+"${lock_args[@]}"} ${target_args[@]+"${target_args[@]}"}
 
   if ((${#build_target[@]})); then
     output="$siteone_dir/target/$target/release/siteone-crawler"
