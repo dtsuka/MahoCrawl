@@ -11,7 +11,9 @@ const bridgeMock = vi.hoisted(() => ({
   getStatus: vi.fn(),
   isTauri: false as boolean,
   listCaptures: vi.fn(),
+  listScanRuns: vi.fn(),
   listSeoPages: vi.fn(),
+  loadScanRun: vi.fn(),
   loadConfiguration: vi.fn(),
   openPath: vi.fn(),
   readCapture: vi.fn(),
@@ -19,6 +21,7 @@ const bridgeMock = vi.hoisted(() => ({
   revealPath: vi.fn(),
   saveConfiguration: vi.fn(),
   selectOutputFolder: vi.fn(),
+  selectScanFolder: vi.fn(),
   startCrawl: vi.fn(),
   stopCrawl: vi.fn(),
   subscribeCaptures: vi.fn(),
@@ -49,6 +52,7 @@ function prepareTauriMocks(): void {
   bridgeMock.getLog.mockResolvedValue('')
   bridgeMock.getStatus.mockResolvedValue({ ...idleStatus })
   bridgeMock.listCaptures.mockResolvedValue([])
+  bridgeMock.listScanRuns.mockResolvedValue([])
   bridgeMock.listSeoPages.mockResolvedValue([])
   bridgeMock.subscribeCaptures.mockResolvedValue(null)
   bridgeMock.subscribeOutput.mockResolvedValue(null)
@@ -78,7 +82,9 @@ describe('settings sidebar', () => {
   bridgeMock.getLog.mockReset()
   bridgeMock.getStatus.mockReset()
   bridgeMock.listCaptures.mockReset()
+  bridgeMock.listScanRuns.mockReset()
   bridgeMock.listSeoPages.mockReset()
+  bridgeMock.loadScanRun.mockReset()
   bridgeMock.loadConfiguration.mockReset()
   bridgeMock.openPath.mockReset()
   bridgeMock.readCapture.mockReset()
@@ -86,6 +92,7 @@ describe('settings sidebar', () => {
   bridgeMock.revealPath.mockReset()
   bridgeMock.saveConfiguration.mockReset()
   bridgeMock.selectOutputFolder.mockReset()
+  bridgeMock.selectScanFolder.mockReset()
   bridgeMock.startCrawl.mockReset()
   bridgeMock.stopCrawl.mockReset()
   bridgeMock.subscribeCaptures.mockReset()
@@ -203,7 +210,8 @@ describe('settings sidebar', () => {
 
     expect(wrapper.find('button[aria-label="その他"]').exists()).toBe(false)
     expect(wrapper.find('.more-button').exists()).toBe(false)
-    expect(header.findAll('.run-actions button')).toHaveLength(2)
+    expect(header.findAll('.run-actions button')).toHaveLength(3)
+    expect(header.text()).toContain('過去のスキャン')
     expect(header.text()).toContain('HTMLレポート')
     expect(header.text()).toContain('保存先')
 
@@ -281,6 +289,148 @@ describe('settings sidebar', () => {
     wrapper.unmount()
   })
 
+  async function openLoadedPreview() {
+    const wrapper = await mountApp({ tauri: true })
+    ;(wrapper.vm as unknown as { captures: CaptureItem[] }).captures = [0, 1].map((index) => ({
+      path: `/captures/preview-${index}.png`, filename: `preview-${index}.png`, bytes: 2048,
+      modifiedAt: 2 - index, sizeId: 'desktop', sizeLabel: 'Desktop', width: 1440, height: 900,
+    }))
+    bridgeMock.readCapture.mockResolvedValue({ mimeType: 'image/png', dataBase64: 'ZmFrZQ==' })
+    await nextTick()
+    await wrapper.find('.capture-card').trigger('click')
+    await flushPromises()
+    const image = wrapper.find<HTMLImageElement>('.preview-image-wrap img')
+    Object.defineProperties(image.element, { naturalWidth: { value: 1440 }, naturalHeight: { value: 2400 } })
+    await image.trigger('load')
+    return wrapper
+  }
+
+  it('switches all three image modes with accessible pressed states', async () => {
+    const wrapper = await openLoadedPreview()
+    const buttons = wrapper.findAll('.preview-controls button')
+    expect(buttons.map((button) => button.text())).toEqual(['全体', '100%', '左右いっぱい'])
+    for (const [index, mode] of ['fit', 'actual', 'width'].entries()) {
+      await buttons[index].trigger('click')
+      expect(buttons.map((button) => button.attributes('aria-pressed'))).toEqual(
+        buttons.map((_, buttonIndex) => String(buttonIndex === index)),
+      )
+      expect(wrapper.find('.preview-image-wrap').classes().includes('is-actual')).toBe(mode === 'actual')
+      expect(wrapper.find('.preview-image-wrap').classes().includes('is-width')).toBe(mode === 'width')
+    }
+    wrapper.unmount()
+  })
+
+  it.each(['fit', 'actual', 'width'])('persists %s across reopening and remounting', async (mode) => {
+    const key = 'maho-crawl.preview-image-mode.v1'
+    const saved = new Map<string, string>()
+    vi.mocked(localStorage.getItem).mockImplementation((storageKey) => saved.get(storageKey) ?? null)
+    vi.mocked(localStorage.setItem).mockImplementation((storageKey, value) => { saved.set(storageKey, value) })
+    const wrapper = await openLoadedPreview()
+    const index = ['fit', 'actual', 'width'].indexOf(mode)
+    // 全体も別モードから選び直して保存を確認する。
+    await wrapper.findAll('.preview-controls button')[index === 0 ? 1 : 0].trigger('click')
+    await wrapper.findAll('.preview-controls button')[index].trigger('click')
+    expect(localStorage.setItem).toHaveBeenCalledWith(key, mode)
+    await wrapper.find('button[aria-label="プレビューを閉じる"]').trigger('click')
+    await wrapper.find('.capture-card').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.preview-controls button')[index].attributes('aria-pressed')).toBe('true')
+    wrapper.unmount()
+    const remounted = await openLoadedPreview()
+    expect(remounted.findAll('.preview-controls button')[index].attributes('aria-pressed')).toBe('true')
+    remounted.unmount()
+  })
+
+  it.each(['invalid', 'unavailable'])('falls back to fit when storage is %s', async (value) => {
+    vi.mocked(localStorage.getItem).mockImplementation((key) => {
+      if (key !== 'maho-crawl.preview-image-mode.v1') return null
+      if (value === 'unavailable') throw new Error('storage unavailable')
+      return value
+    })
+    vi.mocked(localStorage.setItem).mockImplementation(() => { throw new Error('storage unavailable') })
+    const wrapper = await openLoadedPreview()
+    expect(wrapper.findAll('.preview-controls button')[0].attributes('aria-pressed')).toBe('true')
+    await wrapper.findAll('.preview-controls button')[2].trigger('click')
+    expect(wrapper.find('.preview-image-wrap').classes()).toContain('is-width')
+    wrapper.unmount()
+  })
+
+  it('maximizes, restores, preserves size during navigation, and resets size on close', async () => {
+    const wrapper = await openLoadedPreview()
+    const maximize = () => wrapper.find('button[aria-label="ウィンドウいっぱいに表示"]')
+    expect(maximize().attributes('aria-pressed')).toBe('false')
+    await maximize().trigger('click')
+    expect(wrapper.find('.preview-modal').classes()).toContain('is-maximized')
+    expect(wrapper.find('.preview-backdrop').classes()).toContain('is-maximized')
+    const restore = wrapper.find('button[aria-label="元のサイズに戻す"]')
+    expect(restore.attributes('aria-pressed')).toBe('true')
+    await restore.trigger('click')
+    expect(wrapper.find('.preview-modal').classes()).not.toContain('is-maximized')
+    await maximize().trigger('click')
+    await wrapper.find('button[aria-label="次の画像"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.preview-modal').classes()).toContain('is-maximized')
+    await wrapper.find('button[aria-label="プレビューを閉じる"]').trigger('click')
+    await wrapper.find('.capture-card').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.preview-modal').classes()).not.toContain('is-maximized')
+    wrapper.unmount()
+  })
+
+  it.each([1, 2])('keeps mode %s during overlay and keyboard navigation and image errors', async (index) => {
+    const wrapper = await openLoadedPreview()
+    await wrapper.findAll('.preview-controls button')[index].trigger('click')
+    const previous = wrapper.find<HTMLButtonElement>('.preview-image-area button[aria-label="前の画像"]')
+    const next = wrapper.find<HTMLButtonElement>('.preview-image-area button[aria-label="次の画像"]')
+    expect(previous.element.disabled).toBe(true)
+    expect(previous.attributes('title')).toContain('（←）')
+    expect(next.attributes('title')).toContain('（→）')
+    expect(wrapper.find('footer button[aria-label="次の画像"]').exists()).toBe(false)
+    await next.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.preview-navigation').text()).toBe('2 / 2')
+    expect(next.element.disabled).toBe(true)
+    expect(wrapper.findAll('.preview-controls button')[index].attributes('aria-pressed')).toBe('true')
+    await previous.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.preview-navigation').text()).toBe('1 / 2')
+    await wrapper.find('.preview-modal').trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    expect(wrapper.find('.preview-navigation').text()).toBe('2 / 2')
+    await wrapper.find('.preview-image-wrap img').trigger('error')
+    expect(wrapper.findAll('.preview-controls button')[index].attributes('aria-pressed')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('moves through the visible images with buttons and arrow keys', async () => {
+    const wrapper = await mountApp()
+    const cards = wrapper.findAll('.capture-card')
+    await cards[0].trigger('click')
+    await flushPromises()
+
+    const modal = wrapper.find('.preview-modal')
+    const previous = wrapper.find<HTMLButtonElement>('button[aria-label="前の画像"]')
+    const next = wrapper.find<HTMLButtonElement>('button[aria-label="次の画像"]')
+    expect(previous.element.disabled).toBe(true)
+    expect(next.element.disabled).toBe(false)
+    expect(modal.text()).toContain('1 / 6')
+    expect(modal.text()).toContain('home-desktop.png')
+
+    await next.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.preview-modal').text()).toContain('about-desktop.png')
+    expect(wrapper.find('.preview-modal').text()).toContain('2 / 6')
+
+    await wrapper.find('.preview-modal').trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    expect(wrapper.find('.preview-modal').text()).toContain('home-tablet.png')
+
+    await wrapper.find('.preview-modal').trigger('keydown', { key: 'ArrowLeft' })
+    await flushPromises()
+    expect(wrapper.find('.preview-modal').text()).toContain('about-desktop.png')
+    wrapper.unmount()
+  })
+
   it('resolves each row size by id even when labels are duplicated', async () => {
     const wrapper = await mountApp()
     await wrapper.find<HTMLButtonElement>('button[aria-label="行表示"]').trigger('click')
@@ -308,6 +458,11 @@ describe('settings sidebar', () => {
     expect(wrapper.find('.preview-modal').text()).toContain('page-tablet.png')
     expect(wrapper.find('.preview-modal').text()).toContain('同じ名前 · 768 × 1024')
     expect((wrapper.vm as unknown as { selectedCapture: CaptureItem }).selectedCapture.sizeId).toBe('tablet')
+
+    await wrapper.find<HTMLButtonElement>('button[aria-label="前の画像"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.preview-modal').text()).toContain('page-desktop.png')
+    expect(wrapper.find('.preview-modal').text()).toContain('2 / 3')
 
     wrapper.unmount()
   })
@@ -423,9 +578,10 @@ describe('settings sidebar', () => {
     expect(document.activeElement).toBe(modal.element)
 
     const closeButton = wrapper.find<HTMLButtonElement>('button[aria-label="プレビューを閉じる"]')
+    const nextButton = wrapper.find<HTMLButtonElement>('button[aria-label="次の画像"]')
     closeButton.element.focus()
     await modal.trigger('keydown', { key: 'Tab' })
-    expect(document.activeElement).toBe(closeButton.element)
+    expect(document.activeElement).toBe(nextButton.element)
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }))
     expect(bridgeMock.startCrawl).not.toHaveBeenCalled()
@@ -441,6 +597,71 @@ describe('settings sidebar', () => {
     await backdrop.trigger('click')
     expect(wrapper.find('.preview-modal').exists()).toBe(false)
     expect(document.activeElement).toBe(opener.element)
+    wrapper.unmount()
+  })
+
+  it('lists saved scans, switches to a selected folder, and opens a historical result', async () => {
+    const defaultRoot = DEFAULT_CONFIGURATION.outputRoot
+    const externalRoot = '/Volumes/Archive/MahoCrawl'
+    const runPath = `${externalRoot}/example.com-20260915-120000`
+    const run = {
+      runId: 'example.com-20260915-120000',
+      path: runPath,
+      modifiedAt: 1_789_445_400,
+      sizeCount: 1,
+      captureCount: 8,
+      hasHtmlReport: true,
+    }
+    const plan = {
+      root: runPath,
+      sizeRoot: `${runPath}/desktop-1440x900`,
+      captures: `${runPath}/desktop-1440x900/screenshots`,
+      httpCacheDir: `${runPath}/desktop-1440x900/.siteone-http-cache`,
+      htmlReport: `${runPath}/desktop-1440x900/report.html`,
+      jsonReport: `${runPath}/desktop-1440x900/report.json`,
+      textReport: `${runPath}/desktop-1440x900/report.txt`,
+      sizeSlug: 'desktop-1440x900',
+    }
+    bridgeMock.listScanRuns
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([run])
+    bridgeMock.selectScanFolder.mockResolvedValue(externalRoot)
+    bridgeMock.loadScanRun.mockResolvedValue({
+      ...idleStatus,
+      phase: 'succeeded',
+      runId: run.runId,
+      sizeIndex: 1,
+      sizeTotal: 1,
+      currentPlan: plan,
+      plans: [plan],
+      runCaptures: [{ id: 'desktop-1440x900', label: 'Desktop', width: 1440, height: 900, enabled: true }],
+      message: '過去のスキャンを開きました',
+    })
+    const wrapper = await mountApp({ tauri: true })
+    const historyButton = wrapper.findAll<HTMLButtonElement>('.run-actions button')[0]
+
+    await historyButton.trigger('click')
+    await flushPromises()
+    expect(bridgeMock.listScanRuns).toHaveBeenCalledWith(defaultRoot)
+    expect(wrapper.find('.history-modal').exists()).toBe(true)
+    expect(document.activeElement).toBe(wrapper.find('.history-modal').element)
+    expect(wrapper.find('.history-state').text()).toContain('スキャン結果が見つかりません')
+
+    await wrapper.find<HTMLButtonElement>('.history-state button').trigger('click')
+    await flushPromises()
+    expect(bridgeMock.selectScanFolder).toHaveBeenCalledTimes(1)
+    expect(bridgeMock.listScanRuns).toHaveBeenLastCalledWith(externalRoot)
+    expect(wrapper.find('.history-list').text()).toContain(run.runId)
+    expect(wrapper.find('.history-list').text()).toContain('8件のキャプチャ')
+
+    await wrapper.find<HTMLButtonElement>('.history-list li > button').trigger('click')
+    await flushPromises()
+    expect(bridgeMock.loadScanRun).toHaveBeenCalledWith(runPath)
+    expect(bridgeMock.listCaptures).toHaveBeenCalledWith(runPath, expect.any(Object))
+    expect(bridgeMock.listSeoPages).toHaveBeenCalledWith(runPath)
+    expect(wrapper.find('.history-modal').exists()).toBe(false)
+    expect(wrapper.text()).toContain('過去のスキャンを開きました')
+    expect(wrapper.text()).toContain(runPath)
     wrapper.unmount()
   })
 
@@ -485,7 +706,7 @@ describe('settings sidebar', () => {
     expect(wrapper.find('tr.result-row').text()).toContain('キャプチャなし')
     expect(wrapper.findAll('.size-button')).toHaveLength(0)
     expect(wrapper.findAll('.filter-pills button')).toHaveLength(1)
-    await wrapper.findAll('.run-actions button')[0].trigger('click')
+    await wrapper.findAll('.run-actions button')[1].trigger('click')
     expect(bridgeMock.openPath).toHaveBeenCalledWith(plan.htmlReport)
 
     if (mode === 'disabled') {
