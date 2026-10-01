@@ -141,7 +141,7 @@ Tauri externalBin は次のターゲット名を使用します。
 
 ビルド対象は、macOS では Apple Silicon / Intel、Windows（Git Bash）では x86_64 が既定です。`SITEONE_TARGETS` 環境変数（空白区切り）で変更できます。
 
-Windows ではクロールの停止時に `taskkill /T /F` で SiteOne Crawler と子プロセス（Chrome など）をまとめて終了します。macOS ではプロセスグループに SIGINT を送り、終了しない場合に SIGKILL を送ります。
+macOS ではクロールの停止時にプロセスグループへ SIGINT を送り、1.5秒以内に終了しない場合は SIGKILL を送ります。Windows の GUI アプリからは SIGINT に相当する穏やかな停止要求を送れないため、停止を要求してから1.5秒後も SiteOne Crawler が動いている場合に、`taskkill /T /F` で SiteOne Crawler と子プロセス（Chrome など）をまとめて強制終了します。
 
 更新後は `siteone-crawler-* --version`、`cargo test`、`npm run build`、`cargo check` を実行してください。SiteOne の CLI に存在しない独自フラグは渡しません。現在の v2.5.1 には cookie banner 専用 CLI フラグがないため、設定値は保存しつつ、UI では「現在未対応」と明示して操作を無効化しています。
 
