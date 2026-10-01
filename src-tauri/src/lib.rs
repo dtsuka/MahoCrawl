@@ -348,6 +348,17 @@ pub struct CaptureImage {
     pub data_base64: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanRunSummary {
+    pub run_id: String,
+    pub path: String,
+    pub modified_at: u64,
+    pub size_count: usize,
+    pub capture_count: usize,
+    pub has_html_report: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SeoPageItem {
@@ -436,6 +447,7 @@ struct RuntimeState {
     start_in_progress: bool,
     child: Option<Child>,
     allowed_open_roots: Vec<PathBuf>,
+    history_browse_roots: Vec<PathBuf>,
 }
 
 impl Default for RuntimeState {
@@ -447,6 +459,7 @@ impl Default for RuntimeState {
             start_in_progress: false,
             child: None,
             allowed_open_roots: Vec::new(),
+            history_browse_roots: Vec::new(),
         }
     }
 }
@@ -575,6 +588,136 @@ fn output_plans_for_root(root: &Path, captures: &[CaptureViewport]) -> Vec<Outpu
         .iter()
         .map(|viewport| output_plan_for(root, Some(viewport)))
         .collect()
+}
+
+fn existing_output_plan(root: &Path, size_root: &Path) -> OutputPlan {
+    let size_slug = size_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("size")
+        .to_string();
+    OutputPlan {
+        root: root.to_string_lossy().to_string(),
+        size_root: size_root.to_string_lossy().to_string(),
+        captures: size_root.join("screenshots").to_string_lossy().to_string(),
+        http_cache_dir: size_root
+            .join(".siteone-http-cache")
+            .to_string_lossy()
+            .to_string(),
+        html_report: size_root.join("report.html").to_string_lossy().to_string(),
+        json_report: size_root.join("report.json").to_string_lossy().to_string(),
+        text_report: size_root.join("report.txt").to_string_lossy().to_string(),
+        size_slug,
+    }
+}
+
+fn infer_viewport_from_slug(slug: &str) -> Option<CaptureViewport> {
+    if slug == "metadata" {
+        return None;
+    }
+    let (label_slug, dimensions) = slug.rsplit_once('-')?;
+    let (width, height) = dimensions.split_once('x')?;
+    let width = width.parse::<u32>().ok()?;
+    let height = height.parse::<u32>().ok()?;
+    if !(MIN_DIMENSION..=MAX_DIMENSION).contains(&width)
+        || !(MIN_DIMENSION..=MAX_DIMENSION).contains(&height)
+        || label_slug.is_empty()
+    {
+        return None;
+    }
+    let label = match label_slug {
+        "desktop" => "Desktop".to_string(),
+        "tablet" => "Tablet".to_string(),
+        "mobile" => "Mobile".to_string(),
+        value => value.replace(['-', '_'], " "),
+    };
+    Some(CaptureViewport::new(slug, label, width, height))
+}
+
+fn count_capture_files(directory: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().is_file() && image_mime_type(&entry.path()).is_some())
+        .count()
+}
+
+fn discover_scan_run(path: &Path) -> Result<Option<(ScanRunSummary, CrawlStatus)>, CrawlError> {
+    if !path.is_dir() {
+        return Ok(None);
+    }
+    let root = fs::canonicalize(path).map_err(|error| CrawlError::Io(error.to_string()))?;
+    let mut size_directories = fs::read_dir(&root)
+        .map_err(|error| CrawlError::Io(error.to_string()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|entry| entry.is_dir())
+        .filter(|entry| {
+            !entry
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.starts_with('.'))
+        })
+        .filter(|entry| {
+            entry.join("report.html").is_file()
+                || entry.join("report.json").is_file()
+                || entry.join("report.txt").is_file()
+                || entry.join("screenshots").is_dir()
+        })
+        .collect::<Vec<_>>();
+    size_directories.sort();
+    if size_directories.is_empty() {
+        return Ok(None);
+    }
+
+    let plans = size_directories
+        .iter()
+        .map(|directory| existing_output_plan(&root, directory))
+        .collect::<Vec<_>>();
+    let run_captures = plans
+        .iter()
+        .filter_map(|plan| infer_viewport_from_slug(&plan.size_slug))
+        .collect::<Vec<_>>();
+    let capture_count = size_directories
+        .iter()
+        .map(|directory| count_capture_files(&directory.join("screenshots")))
+        .sum();
+    let modified_at = fs::metadata(&root)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let run_id = root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("scan")
+        .to_string();
+    let summary = ScanRunSummary {
+        run_id: run_id.clone(),
+        path: root.to_string_lossy().to_string(),
+        modified_at,
+        size_count: run_captures.len(),
+        capture_count,
+        has_html_report: plans
+            .iter()
+            .any(|plan| Path::new(&plan.html_report).is_file()),
+    };
+    let status = CrawlStatus {
+        phase: RunPhase::Succeeded,
+        run_id: Some(run_id),
+        size_index: plans.len(),
+        size_total: run_captures.len(),
+        current_size_id: None,
+        current_size_label: None,
+        current_plan: plans.first().cloned(),
+        plans,
+        run_captures,
+        message: Some("過去のスキャンを開きました".to_string()),
+    };
+    Ok(Some((summary, status)))
 }
 
 pub fn make_output_plans(
@@ -2056,6 +2199,94 @@ fn list_seo_pages(
 }
 
 #[tauri::command]
+fn list_scan_runs(
+    state: tauri::State<'_, AppState>,
+    root: String,
+) -> Result<Vec<ScanRunSummary>, String> {
+    let requested = expand_path(root.trim());
+    if !requested.exists() {
+        return Ok(Vec::new());
+    }
+    let root = fs::canonicalize(&requested).map_err(|error| error.to_string())?;
+    if !root.is_dir() {
+        return Err("スキャンの保存先フォルダを指定してください。".to_string());
+    }
+    {
+        let mut guard = state
+            .runtime
+            .lock()
+            .map_err(|_| "履歴フォルダの許可情報を更新できません。".to_string())?;
+        if !guard
+            .history_browse_roots
+            .iter()
+            .any(|known| known == &root)
+        {
+            guard.history_browse_roots.push(root.clone());
+        }
+    }
+
+    if let Some((summary, _)) = discover_scan_run(&root).map_err(|error| error.to_string())? {
+        return Ok(vec![summary]);
+    }
+
+    let mut runs = fs::read_dir(&root)
+        .map_err(|error| error.to_string())?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter_map(|path| {
+            discover_scan_run(&path)
+                .ok()
+                .flatten()
+                .map(|(summary, _)| summary)
+        })
+        .collect::<Vec<_>>();
+    runs.sort_by(|left, right| {
+        right
+            .modified_at
+            .cmp(&left.modified_at)
+            .then_with(|| right.run_id.cmp(&left.run_id))
+    });
+    runs.truncate(500);
+    Ok(runs)
+}
+
+#[tauri::command]
+fn load_scan_run(state: tauri::State<'_, AppState>, path: String) -> Result<CrawlStatus, String> {
+    let path = expand_path(path.trim());
+    let browse_roots = state
+        .runtime
+        .lock()
+        .map(|guard| {
+            if guard.status.phase.is_active() || guard.start_in_progress {
+                return Err("クロール実行中は過去のスキャンを開けません。".to_string());
+            }
+            Ok(guard.history_browse_roots.clone())
+        })
+        .map_err(|_| "履歴フォルダの許可情報を読み込めません。".to_string())??;
+    if !is_path_allowed(&path, &browse_roots) {
+        return Err("一覧に表示されたスキャン以外は開けません。".to_string());
+    }
+    let root = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+    let (_, status) = discover_scan_run(&root)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "MahoCrawlのスキャン結果が見つかりません。".to_string())?;
+    let mut guard = state
+        .runtime
+        .lock()
+        .map_err(|_| "過去のスキャンを読み込めません。".to_string())?;
+    if guard.status.phase.is_active() || guard.start_in_progress {
+        return Err("クロール実行中は過去のスキャンを開けません。".to_string());
+    }
+    guard.status = status.clone();
+    guard.log.clear();
+    if !guard.allowed_open_roots.iter().any(|known| known == &root) {
+        guard.allowed_open_roots.push(root);
+    }
+    Ok(status)
+}
+
+#[tauri::command]
 fn read_capture(state: tauri::State<'_, AppState>, path: String) -> Result<CaptureImage, String> {
     let path = expand_path(path.trim());
     let allowed = state
@@ -2177,6 +2408,19 @@ fn select_output_folder(app: AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+fn select_scan_folder(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("スキャン結果のフォルダを選択")
+        .blocking_pick_folder();
+    Ok(selected
+        .and_then(|path| path.into_path().ok())
+        .map(|path| path.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
 fn clear_log(state: tauri::State<'_, AppState>) -> Result<(), String> {
     state
         .runtime
@@ -2206,11 +2450,14 @@ pub fn run() {
             stop_crawl,
             list_captures,
             list_seo_pages,
+            list_scan_runs,
+            load_scan_run,
             read_capture,
             read_capture_thumbnail,
             open_path,
             reveal_path,
             select_output_folder,
+            select_scan_folder,
             clear_log,
             app_metadata,
         ])
@@ -2257,6 +2504,44 @@ mod tests {
         assert_eq!(configuration.captures.len(), 3);
         assert_eq!(configuration.enabled_captures().len(), 3);
         assert!(configuration.validate().is_ok());
+    }
+
+    #[test]
+    fn discovers_an_existing_scan_and_reconstructs_its_viewports() {
+        let base = std::env::temp_dir().join(format!(
+            "maho-crawl-history-discovery-{}",
+            std::process::id()
+        ));
+        let run = base.join("example.com-20260915-120000");
+        let desktop = run.join("desktop-1440x900");
+        let custom = run.join("landing-page-800x1200");
+        let metadata = run.join("metadata");
+        std::fs::create_dir_all(desktop.join("screenshots")).unwrap();
+        std::fs::create_dir_all(custom.join("screenshots")).unwrap();
+        std::fs::create_dir_all(&metadata).unwrap();
+        std::fs::write(desktop.join("screenshots/home.png"), b"image").unwrap();
+        std::fs::write(desktop.join("report.json"), b"{}").unwrap();
+        std::fs::write(custom.join("report.html"), b"report").unwrap();
+        std::fs::write(metadata.join("report.txt"), b"metadata").unwrap();
+
+        let (summary, status) = discover_scan_run(&run).unwrap().unwrap();
+
+        assert_eq!(summary.run_id, "example.com-20260915-120000");
+        assert_eq!(summary.size_count, 2);
+        assert_eq!(summary.capture_count, 1);
+        assert!(summary.has_html_report);
+        assert_eq!(status.phase, RunPhase::Succeeded);
+        assert_eq!(status.plans.len(), 3);
+        assert_eq!(status.run_captures[0].label, "Desktop");
+        assert_eq!(status.run_captures[0].width, 1440);
+        assert_eq!(status.run_captures[0].height, 900);
+        assert_eq!(safe_size_slug(&status.run_captures[0]), "desktop-1440x900");
+        assert_eq!(status.run_captures[1].label, "landing page");
+        assert_eq!(
+            safe_size_slug(&status.run_captures[1]),
+            "landing-page-800x1200"
+        );
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
