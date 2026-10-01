@@ -2555,6 +2555,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn relative_non_page_screenshots_are_removed_and_outside_files_preserved() {
+        let root = std::env::temp_dir().join(format!("maho-relative-{}", std::process::id()));
+        let shots = root.join("screenshots");
+        fs::create_dir_all(&shots).unwrap();
+        fs::write(shots.join("font.png"), b"image").unwrap();
+        fs::write(root.join("outside.png"), b"keep").unwrap();
+        let report = root.join("report.json");
+        fs::write(
+            &report,
+            serde_json::to_vec(&serde_json::json!({"tables": {"browser-screenshots": {"rows": [
+                {"url":"https://example.com/font.woff2", "path":"screenshots/font.png"},
+                {"url":"https://example.com/font.woff2", "path":"outside.png"}
+            ]}}}))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(filter_non_page_screenshots(&report, &shots).unwrap(), 1);
+        assert!(root.join("outside.png").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovered_metadata_and_unknown_sizes_have_consistent_progress() {
+        let root = std::env::temp_dir().join(format!("maho-progress-{}", std::process::id()));
+        for slug in ["metadata", "custom", "desktop-1440x900"] {
+            fs::create_dir_all(root.join(slug)).unwrap();
+            fs::write(root.join(slug).join("report.json"), b"{}").unwrap();
+        }
+        let (_, status) = discover_scan_run(&root).unwrap().unwrap();
+        assert_eq!(status.size_index, status.size_total);
+        assert_eq!(status.size_total, 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn heading_entities_are_decoded_once() {
         assert_eq!(
             normalize_heading_text("&amp;lt; &lt; &#65; &#x1F600; &unknown;"),
