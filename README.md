@@ -4,7 +4,12 @@ MahoCrawl は、SiteOne Crawler v2.5.1 を安全な Tauri v2 bridge から呼び
 
 ## ダウンロード
 
-ビルド済みのアプリは [GitHub Releases](../../releases) から入手できます。zip を展開し、`MahoCrawl.app` を「アプリケーション」フォルダへ移動して起動してください。SiteOne Crawler はアプリに同梱されているため、別途インストールは不要です。
+ビルド済みのアプリは [GitHub Releases](../../releases) から入手できます。お使いの Mac に合わせて zip を選んでください。
+
+- Apple Silicon（M1 以降）: `MahoCrawl_<version>_aarch64.zip`
+- Intel: `MahoCrawl_<version>_x86_64.zip`
+
+zip を展開し、`MahoCrawl.app` を「アプリケーション」フォルダへ移動して起動してください。SiteOne Crawler はアプリに同梱されているため、別途インストールは不要です。
 
 Apple の Developer ID で署名・公証していないビルドの場合、初回起動時に「開発元を確認できないため開けません」と表示されます。その場合は次のいずれかで起動してください。
 
@@ -62,6 +67,12 @@ npm run build:app
 `build:app` は第三者ライセンス一覧（`Resources/Licenses/THIRD_PARTY_LICENSES.txt`）を再生成してからアプリをビルドします。事前に `npm run build:siteone` と `cargo install cargo-about --locked --features cli` が必要です。Rust のビルド成果物にはローカルの絶対パスを残さないよう `--remap-path-prefix` を付けています。
 
 ビルド成功後、`src-tauri/target/release/bundle/macos/MahoCrawl.app` をプロジェクト直下の `release/MahoCrawl.app` に自動コピーします。次回以降はコピー完了後に前回のアプリを置き換えます。`release/` は Git 管理対象外です。
+
+GitHub Releases 掲載用の zip は次で作成します。Apple Silicon 版と Intel 版をそれぞれビルドし、`release/MahoCrawl_<version>_aarch64.zip` と `release/MahoCrawl_<version>_x86_64.zip` を出力します（ad-hoc 署名済み・未公証）。
+
+```bash
+npm run build:release
+```
 
 `npm run build` はフロントエンドのみのビルド、`npm run tauri build` は Tauri 標準の出力先へのビルドです。
 
