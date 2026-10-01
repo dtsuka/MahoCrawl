@@ -122,4 +122,28 @@ describe('SeoResultsTable', () => {
     expect(wrapper.find('.detail-row').exists()).toBe(false)
     wrapper.unmount()
   })
+
+  it('groups detail entries into labeled sections with one entry per row', async () => {
+    const wrapper = mount(SeoResultsTable, { props: { pages: [page({ canonical: null })], sizes } })
+    await wrapper.find('button.detail-toggle').trigger('click')
+
+    const groups = wrapper.findAll('.detail-group')
+    expect(groups.map((group) => group.find('h4').text())).toEqual(['基本情報', 'OGP', 'Twitter', '見出し'])
+    expect(groups.map((group) => group.findAll('.detail-entry dt').map((dt) => dt.text()))).toEqual([
+      ['URL', 'Title', 'Description', 'Canonical'],
+      ['og:title', 'og:description', 'og:image'],
+      ['twitter:title', 'twitter:description', 'twitter:image'],
+      ['H1', 'H2'],
+    ])
+    // 各グループは見出しで名前付けされた dl として読み上げられる
+    for (const group of groups) {
+      const headingId = group.find('h4').attributes('id')
+      expect(headingId).toBeTruthy()
+      expect(group.find('dl').attributes('aria-labelledby')).toBe(headingId)
+    }
+    const canonical = groups[0]!.findAll('.detail-entry')[3]!
+    expect(canonical.classes()).toContain('is-missing')
+    expect(canonical.find('dd').classes()).toContain('missing')
+    wrapper.unmount()
+  })
 })
