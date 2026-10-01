@@ -615,6 +615,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    #[cfg(unix)]
     fn configuration_save_replaces_without_following_destination_symlink() {
         use std::os::unix::fs::symlink;
         let root = std::env::temp_dir().join(format!("maho-atomic-{}", std::process::id()));
@@ -873,5 +874,11 @@ mod tests {
             configuration.validate(),
             Err(ValidationError::InvalidHttpAuthValue)
         );
+    }
+
+    #[test]
+    fn default_output_root_is_pictures_folder_in_home() {
+        let expected = crate::platform::home_dir().join("Pictures").join("MahoCrawl");
+        assert_eq!(PathBuf::from(default_output_root()), expected);
     }
 }
