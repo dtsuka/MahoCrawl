@@ -7,7 +7,9 @@ import {
   getStatus,
   isTauri,
   listCaptures,
+  listScanRuns,
   listSeoPages,
+  loadScanRun,
   loadConfiguration,
   readCapture,
   readCaptureThumbnail,
@@ -15,6 +17,7 @@ import {
   revealPath,
   saveConfiguration,
   selectOutputFolder,
+  selectScanFolder,
   startCrawl,
   stopCrawl,
   subscribeCaptures,
@@ -37,6 +40,7 @@ import {
   type CrawlStatus,
   type GalleryView,
   type RunPhase,
+  type ScanRunSummary,
   type SeoPageItem,
 } from './types'
 import { searchCaptures, searchSeoPages, sortSeoPages, type SeoPageSortOrder } from './gallery'
@@ -45,6 +49,8 @@ import AppIcon from './components/AppIcon.vue'
 
 const LOCAL_STORAGE_KEY = 'maho-crawl.configuration.v1'
 const GALLERY_VIEW_STORAGE_KEY = 'maho-crawl.gallery-view.v1'
+const PREVIEW_IMAGE_MODE_STORAGE_KEY = 'maho-crawl.preview-image-mode.v1'
+type PreviewImageMode = 'fit' | 'actual' | 'width'
 const CAPTURE_PAGE_SIZE = 50
 const configuration = reactive<CrawlConfiguration>(cloneConfiguration(DEFAULT_CONFIGURATION))
 const status = ref<CrawlStatus>({
@@ -107,8 +113,25 @@ const capturePage = ref(1)
 const searchInput = ref('')
 const searchQuery = ref('')
 const previewImage = ref<HTMLImageElement | null>(null)
-const previewImageMode = ref<'fit' | 'actual'>('fit')
+function readPreviewImageModePreference(): PreviewImageMode {
+  try {
+    const saved = localStorage.getItem(PREVIEW_IMAGE_MODE_STORAGE_KEY)
+    return saved === 'actual' || saved === 'width' ? saved : 'fit'
+  } catch {
+    return 'fit'
+  }
+}
+const previewImageMode = ref<PreviewImageMode>(readPreviewImageModePreference())
+const previewMaximized = ref(false)
 const previewImageLoaded = ref(false)
+const historyOpen = ref(false)
+const historyModal = ref<HTMLElement | null>(null)
+const historyOpener = ref<HTMLElement | null>(null)
+const historyRuns = ref<ScanRunSummary[]>([])
+const historyRoot = ref('')
+const historyLoading = ref(false)
+const historyError = ref('')
+const historyOpeningPath = ref('')
 type SettingsSection = 'target' | 'sizes' | 'capture' | 'crawl' | 'browser' | 'output'
 const sectionOpen = reactive<Record<SettingsSection, boolean>>({
   target: true,
@@ -133,10 +156,12 @@ let pendingSave: { revision: number; configuration: CrawlConfiguration } | null 
 let saveQueue: Promise<void> | null = null
 let capturesRefreshToken = 0
 let seoRefreshToken = 0
+let historyRequestToken = 0
 
 interface PreviewRequest {
   token: number
   path: string
+  filename: string
   pageTitle: string
   pageUrl: string
   sizeId: string | null
@@ -147,6 +172,11 @@ interface PreviewContext {
   pageUrl?: string
   sizeId?: string | null
   initialError?: string
+}
+
+interface PreviewEntry {
+  capture: CaptureItem
+  context: PreviewContext
 }
 
 interface RunSnapshot {
@@ -202,6 +232,23 @@ const visibleSeoPages = computed(() => {
     : searchedSeoPages.value.filter((page) => page.sizeIds.includes(captureFilter.value))
   return sortSeoPages(filtered, rowSortOrder.value)
 })
+const previewEntries = computed<PreviewEntry[]>(() => {
+  if (galleryView.value === 'grid') {
+    return visibleCaptures.value.map((capture) => ({ capture, context: {} }))
+  }
+  return visibleSeoPages.value.flatMap((page) => page.sizeIds.map((sizeId) => seoPreviewEntry(page, sizeId)))
+})
+const selectedPreviewIndex = computed(() => {
+  const request = activePreviewRequest
+  // selectedCapture is intentionally read here so this computed value updates
+  // when the non-reactive request guard moves to another image.
+  if (!request || !selectedCapture.value) return -1
+  return previewEntries.value.findIndex((entry) => previewEntryMatches(entry, request))
+})
+const canShowPreviousPreview = computed(() => selectedPreviewIndex.value > 0)
+const canShowNextPreview = computed(() => (
+  selectedPreviewIndex.value >= 0 && selectedPreviewIndex.value < previewEntries.value.length - 1
+))
 const currentProgress = computed(() => {
   if (!status.value.sizeTotal) return 0
   const completedSizes = Math.max(0, status.value.sizeIndex - 1)
@@ -337,7 +384,7 @@ function clearPreviewState(): void {
   selectedImageUrl.value = ''
   previewError.value = ''
   previewImageLoaded.value = false
-  previewImageMode.value = 'fit'
+  previewMaximized.value = false
   previewOpener.value = null
 }
 
@@ -620,9 +667,18 @@ function isCurrentPreview(request: PreviewRequest): boolean {
   return request.token === previewRequestToken
     && activePreviewRequest === request
     && selectedCapture.value?.path === request.path
+    && selectedCapture.value?.filename === request.filename
     && selectedCapture.value?.sizeId === request.sizeId
     && selectedPageTitle.value === request.pageTitle
     && selectedPageUrl.value === request.pageUrl
+}
+
+function previewEntryMatches(entry: PreviewEntry, request: PreviewRequest): boolean {
+  return entry.capture.path === request.path
+    && entry.capture.filename === request.filename
+    && (entry.context.sizeId ?? entry.capture.sizeId) === request.sizeId
+    && (entry.context.pageTitle || '') === request.pageTitle
+    && (entry.context.pageUrl || '') === request.pageUrl
 }
 
 async function openCapturePreview(capture: CaptureItem, context: PreviewContext = {}, opener?: EventTarget | null): Promise<void> {
@@ -630,6 +686,7 @@ async function openCapturePreview(capture: CaptureItem, context: PreviewContext 
   const request: PreviewRequest = {
     token: ++previewRequestToken,
     path: capture.path,
+    filename: capture.filename,
     pageTitle: context.pageTitle || '',
     pageUrl: context.pageUrl || '',
     sizeId: context.sizeId ?? capture.sizeId,
@@ -642,7 +699,6 @@ async function openCapturePreview(capture: CaptureItem, context: PreviewContext 
   previewError.value = context.initialError || ''
   previewPending.value = Boolean(isTauri && capture.path && !context.initialError)
   previewImageLoaded.value = false
-  previewImageMode.value = 'fit'
 
   await nextTick()
   if (!isCurrentPreview(request)) return
@@ -677,7 +733,7 @@ function pageSizeOptions(page: SeoPageItem): Array<{ id: string; label: string }
   }))
 }
 
-async function openSeoCapture(page: SeoPageItem, sizeId: string, opener?: EventTarget | null): Promise<void> {
+function seoPreviewEntry(page: SeoPageItem, sizeId: string): PreviewEntry {
   const size = gallerySizes.value.find((viewport) => viewport.id === sizeId)
   const label = pageSizeOptions(page).find((option) => option.id === sizeId)?.label || size?.label || sizeId
   const mappedCapture = page.captureBySize?.[sizeId] || null
@@ -702,12 +758,26 @@ async function openSeoCapture(page: SeoPageItem, sizeId: string, opener?: EventT
     width: size?.width || null,
     height: size?.height || null,
   }
-  await openCapturePreview(capture || fallback, {
-    pageTitle: page.title || page.url,
-    pageUrl: page.url,
-    sizeId,
-    initialError: capture ? undefined : mappedCapture ? 'このページ・サイズの画像パスを取得できませんでした' : 'このページ・サイズのキャプチャは未取得です',
-  }, opener)
+  return {
+    capture: capture || fallback,
+    context: {
+      pageTitle: page.title || page.url,
+      pageUrl: page.url,
+      sizeId,
+      initialError: capture ? undefined : mappedCapture ? 'このページ・サイズの画像パスを取得できませんでした' : 'このページ・サイズのキャプチャは未取得です',
+    },
+  }
+}
+
+async function openSeoCapture(page: SeoPageItem, sizeId: string, opener?: EventTarget | null): Promise<void> {
+  const entry = seoPreviewEntry(page, sizeId)
+  await openCapturePreview(entry.capture, entry.context, opener)
+}
+
+function navigatePreview(offset: -1 | 1): void {
+  const nextEntry = previewEntries.value[selectedPreviewIndex.value + offset]
+  if (!nextEntry) return
+  void openCapturePreview(nextEntry.capture, nextEntry.context, previewOpener.value)
 }
 
 function handlePreviewImageError(event: Event): void {
@@ -717,7 +787,6 @@ function handlePreviewImageError(event: Event): void {
   selectedImageUrl.value = ''
   previewPending.value = false
   previewImageLoaded.value = false
-  previewImageMode.value = 'fit'
   previewError.value = '画像データを表示できません'
 }
 
@@ -763,6 +832,13 @@ function onModalKeydown(event: KeyboardEvent): void {
     event.stopPropagation()
     return
   }
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return
+    event.preventDefault()
+    event.stopPropagation()
+    navigatePreview(event.key === 'ArrowLeft' ? -1 : 1)
+    return
+  }
   if (event.key !== 'Tab') return
   event.preventDefault()
   event.stopPropagation()
@@ -783,6 +859,39 @@ function onModalKeydown(event: KeyboardEvent): void {
   const nextIndex = event.shiftKey
     ? (currentIndex - 1 + focusable.length) % focusable.length
     : (currentIndex + 1) % focusable.length
+  focusable[nextIndex].focus()
+}
+
+function onHistoryModalKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeHistory()
+    return
+  }
+  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+    event.preventDefault()
+    event.stopPropagation()
+    return
+  }
+  if (event.key !== 'Tab') return
+  event.preventDefault()
+  event.stopPropagation()
+  const modal = historyModal.value
+  if (!modal) return
+  const focusable = Array.from(modal.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  ))
+  if (!focusable.length) {
+    modal.focus()
+    return
+  }
+  const currentIndex = focusable.indexOf(document.activeElement as HTMLElement)
+  const nextIndex = currentIndex < 0
+    ? (event.shiftKey ? focusable.length - 1 : 0)
+    : event.shiftKey
+      ? (currentIndex - 1 + focusable.length) % focusable.length
+      : (currentIndex + 1) % focusable.length
   focusable[nextIndex].focus()
 }
 
@@ -867,6 +976,95 @@ async function openOutput(): Promise<void> {
   const root = status.value.currentPlan?.root || configuration.outputRoot
   if (!isTauri) return
   try { await openPath(root) } catch (error) { errorMessage.value = String(error) }
+}
+
+function formatScanDate(timestamp: number): string {
+  if (!timestamp) return '日時不明'
+  return new Intl.DateTimeFormat('ja-JP', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(timestamp * 1000))
+}
+
+async function refreshScanRuns(root = historyRoot.value): Promise<void> {
+  if (!isTauri || !root) return
+  const token = ++historyRequestToken
+  historyLoading.value = true
+  historyError.value = ''
+  try {
+    const runs = await listScanRuns(root)
+    if (disposed || token !== historyRequestToken || !historyOpen.value) return
+    historyRuns.value = runs
+    historyRoot.value = root
+  } catch (error) {
+    if (!disposed && token === historyRequestToken && historyOpen.value) {
+      historyRuns.value = []
+      historyError.value = `スキャン一覧を読み込めません。${String(error)}`
+    }
+  } finally {
+    if (!disposed && token === historyRequestToken) historyLoading.value = false
+  }
+}
+
+async function openHistory(opener?: EventTarget | null): Promise<void> {
+  if (!isTauri || historyOpen.value) return
+  historyOpener.value = opener as HTMLElement | null
+  historyRoot.value = configuration.outputRoot
+  historyRuns.value = []
+  historyError.value = ''
+  historyOpen.value = true
+  await nextTick()
+  historyModal.value?.focus()
+  await refreshScanRuns(configuration.outputRoot)
+}
+
+function closeHistory(): void {
+  if (!historyOpen.value) return
+  historyRequestToken += 1
+  const opener = historyOpener.value
+  historyOpen.value = false
+  historyLoading.value = false
+  historyOpeningPath.value = ''
+  historyOpener.value = null
+  void nextTick(() => opener?.isConnected && opener.focus())
+}
+
+async function chooseScanFolder(): Promise<void> {
+  if (!isTauri || historyLoading.value || historyOpeningPath.value) return
+  try {
+    const selected = await selectScanFolder()
+    if (!selected || !historyOpen.value) return
+    historyRoot.value = selected
+    await refreshScanRuns(selected)
+  } catch (error) {
+    if (historyOpen.value) historyError.value = `フォルダを選択できません。${String(error)}`
+  }
+}
+
+async function openHistoricalRun(run: ScanRunSummary): Promise<void> {
+  if (!isTauri || isBusy.value || historyOpeningPath.value) return
+  historyOpeningPath.value = run.path
+  historyError.value = ''
+  try {
+    const nextStatus = await loadScanRun(run.path)
+    if (disposed || !historyOpen.value) return
+    activeRunId = null
+    activeRunRoot = null
+    if (!applyStatus(nextStatus)) throw new Error('スキャンの表示状態を更新できません。')
+    activeTab.value = 'captures'
+    logText.value = ''
+    closeHistory()
+    const snapshot = currentRunSnapshot()
+    if (snapshot) await Promise.all([refreshCaptures(snapshot), refreshSeoPages(snapshot)])
+    infoMessage.value = '過去のスキャンを開きました。'
+  } catch (error) {
+    if (!disposed && historyOpen.value) historyError.value = `スキャンを開けません。${String(error)}`
+  } finally {
+    historyOpeningPath.value = ''
+  }
 }
 
 async function openCapture(capture: CaptureItem): Promise<void> {
@@ -1016,6 +1214,15 @@ function appendOutputEvent(text: string): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  if (historyOpen.value) {
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      closeHistory()
+    } else if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault()
+    }
+    return
+  }
   if (sidebarOpen.value && !selectedCapture.value) {
     if (event.key === 'Escape') {
       event.preventDefault()
@@ -1048,6 +1255,10 @@ watch(configuration, () => {
   }
   void persist()
 }, { deep: true })
+watch(previewImageMode, (value) => {
+  try { localStorage.setItem(PREVIEW_IMAGE_MODE_STORAGE_KEY, value) } catch { /* 表示設定の保存は任意 */ }
+})
+
 watch(galleryView, (value) => {
   try { localStorage.setItem(GALLERY_VIEW_STORAGE_KEY, value) } catch { /* preference is optional */ }
 })
@@ -1085,6 +1296,7 @@ onBeforeUnmount(() => {
   lifecycleToken += 1
   startAttemptToken += 1
   invalidatePreviewRequest()
+  historyRequestToken += 1
   window.removeEventListener('keydown', onKeydown)
   unlisteners.forEach((unlisten) => unlisten?.())
 })
@@ -1246,7 +1458,7 @@ onBeforeUnmount(() => {
         </button>
         <div class="phase-icon" :class="statusTone(status.phase)" aria-hidden="true"><span v-if="isBusy" class="spinner"></span><AppIcon v-else-if="status.phase === 'succeeded'" name="check" /><AppIcon v-else-if="status.phase === 'failed'" name="alert" /><span v-else class="phase-ring"></span></div>
         <div class="run-title"><h2>{{ statusTitle() }}</h2><p>{{ statusSubtitle() }}</p></div>
-        <div class="run-actions"><button type="button" :disabled="!reportPath || !isTauri" @click="openReport"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h7l3 3v8H3zM10 2.5v3h3M5.5 8h5M5.5 10.5h5" /></svg><span>HTMLレポート</span></button><button type="button" :disabled="!status.runId || !isTauri" @click="openOutput"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h4l1.25 1.5h5.75v7.5h-11zM2.5 4.5v-1h4l1.25 1" /></svg><span>保存先</span></button></div>
+        <div class="run-actions"><button type="button" :disabled="!isTauri" @click="openHistory($event.currentTarget)"><AppIcon name="history" /><span>過去のスキャン</span></button><button type="button" :disabled="!reportPath || !isTauri" @click="openReport"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h7l3 3v8H3zM10 2.5v3h3M5.5 8h5M5.5 10.5h5" /></svg><span>HTMLレポート</span></button><button type="button" :disabled="!status.runId || !isTauri" @click="openOutput"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h4l1.25 1.5h5.75v7.5h-11zM2.5 4.5v-1h4l1.25 1" /></svg><span>保存先</span></button></div>
       </header>
       <div v-if="isBusy" class="progress-strip" role="progressbar" :aria-valuenow="runMetadataOnly ? undefined : currentProgress" :aria-valuemin="0" :aria-valuemax="100" :aria-label="progressLabel"><span :style="{ transform: `scaleX(${currentProgress / 100})` }"></span></div>
       <div v-if="isBusy" class="progress-label">{{ progressLabel }}<span v-if="status.currentSizeLabel"> · {{ status.currentSizeLabel }}</span></div>
@@ -1287,12 +1499,41 @@ onBeforeUnmount(() => {
       </div>
       <div v-else class="log-workspace"><div class="log-toolbar"><span>実行ログ</span><button type="button" :disabled="!logText" @click="clearLog().then(() => { logText = '' })">ログを消去</button></div><pre>{{ logText || 'クロールを開始するとログが表示されます。' }}</pre></div>
     </section>
-    <div v-if="selectedCapture" class="preview-backdrop" role="presentation" @click.self="closePreview">
-      <section ref="previewModal" class="preview-modal" role="dialog" aria-modal="true" tabindex="-1" :aria-label="`${selectedPageTitle || selectedCapture.filename}のプレビュー`" @keydown="onModalKeydown">
-        <header><div><h2>{{ selectedPageTitle || selectedCapture.filename }}</h2><p v-if="selectedPageUrl" class="preview-url" :title="selectedPageUrl">{{ selectedPageUrl }}</p><p class="preview-meta"><span class="preview-filename" :title="selectedCapture.filename">{{ selectedCapture.filename }}</span><span class="preview-size"> · {{ selectedCapture.sizeLabel || 'サイズ未特定' }} · {{ selectedCapture.width || '—' }} × {{ selectedCapture.height || '—' }}</span><span class="preview-bytes"> · {{ formatBytes(selectedCapture.bytes) }}</span></p></div><button type="button" aria-label="プレビューを閉じる" @click="closePreview"><AppIcon name="close" /></button></header>
-        <div v-if="selectedImageUrl || previewPending || previewError" class="preview-controls" aria-label="画像表示"><span>表示:</span><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'fit' }" :aria-pressed="previewImageMode === 'fit'" @click="previewImageMode = 'fit'">全体</button><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'actual' }" :aria-pressed="previewImageMode === 'actual'" @click="previewImageMode = 'actual'">100%</button><span v-if="previewImageLoaded && previewImage" class="preview-natural-size">{{ previewImage.naturalWidth }} × {{ previewImage.naturalHeight }}px</span></div>
-        <div class="preview-image-wrap" :class="{ 'is-actual': previewImageMode === 'actual' }"><div v-if="previewPending" class="preview-loading" role="status" aria-live="polite">読み込み中…</div><img v-else-if="selectedImageUrl" ref="previewImage" :src="selectedImageUrl" :alt="`${selectedCapture.filename}のプレビュー`" @load="handlePreviewImageLoad" @error="handlePreviewImageError" /><div v-else-if="previewError" class="preview-error"><strong>プレビューを読み込めませんでした</strong><span>{{ previewError }}</span><small>元画像を開くか、Finderで表示してください。</small><button v-if="selectedCapture.path" type="button" @click="retryPreview">再試行</button></div><div v-else-if="!isTauri" class="mock-page large"><span></span><i></i><b></b><em></em></div><div v-else class="preview-error"><strong>プレビュー画像がありません</strong><span>このキャプチャには表示可能な画像がありません。</span></div></div>
-        <footer><button type="button" :disabled="!isTauri || !selectedCapture.path" @click="openCapture(selectedCapture)">元画像を開く</button><button type="button" :disabled="!isTauri || !selectedCapture.path" @click="revealCapture(selectedCapture)">Finderで表示</button></footer>
+    <div v-if="historyOpen" class="preview-backdrop history-backdrop" role="presentation" @click.self="closeHistory">
+      <section ref="historyModal" class="history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title" tabindex="-1" @keydown="onHistoryModalKeydown">
+        <header>
+          <div><h2 id="history-title">過去のスキャン</h2><p>保存済みの結果を選ぶと、キャプチャとSEO情報を再表示します。</p></div>
+          <button type="button" aria-label="過去のスキャンを閉じる" @click="closeHistory"><AppIcon name="close" /></button>
+        </header>
+        <div class="history-toolbar">
+          <div class="history-root"><span>参照中のフォルダ</span><strong :title="historyRoot">{{ historyRoot }}</strong></div>
+          <div class="history-toolbar-actions">
+            <button type="button" :disabled="historyLoading || !!historyOpeningPath" @click="chooseScanFolder"><AppIcon name="folder" />別のフォルダ</button>
+            <button type="button" :disabled="historyLoading || !!historyOpeningPath" aria-label="スキャン一覧を更新" @click="refreshScanRuns()"><AppIcon name="refresh" />更新</button>
+          </div>
+        </div>
+        <p v-if="isBusy" class="history-notice">クロール完了後に過去のスキャンを開けます。</p>
+        <p v-if="historyError" class="history-error" role="alert">{{ historyError }}</p>
+        <div class="history-list-wrap">
+          <div v-if="historyLoading" class="history-state" role="status"><span class="spinner" aria-hidden="true"></span><strong>スキャンを探しています</strong><span>フォルダ内の実行結果を確認しています。</span></div>
+          <div v-else-if="historyRuns.length === 0" class="history-state"><AppIcon name="history" /><strong>スキャン結果が見つかりません</strong><span>別の保存先を使っている場合は、フォルダを指定してください。</span><button type="button" @click="chooseScanFolder">フォルダを指定</button></div>
+          <ul v-else class="history-list" aria-label="保存済みスキャン">
+            <li v-for="run in historyRuns" :key="run.path">
+              <div class="history-run-main"><strong :title="run.runId">{{ run.runId }}</strong><span :title="run.path">{{ run.path }}</span></div>
+              <div class="history-run-meta"><time>{{ formatScanDate(run.modifiedAt) }}</time><span>{{ run.sizeCount ? `${run.sizeCount}サイズ` : 'メタ情報のみ' }}</span><span>{{ run.captureCount }}件のキャプチャ</span><span v-if="run.hasHtmlReport">HTMLレポートあり</span></div>
+              <button type="button" :disabled="isBusy || (!!historyOpeningPath && historyOpeningPath !== run.path)" @click="openHistoricalRun(run)">{{ historyOpeningPath === run.path ? '読み込み中…' : '開く' }}</button>
+            </li>
+          </ul>
+        </div>
+      </section>
+    </div>
+    <div v-if="selectedCapture" class="preview-backdrop" :class="{ 'is-maximized': previewMaximized }" role="presentation" @click.self="closePreview">
+      <section ref="previewModal" class="preview-modal" :class="{ 'is-maximized': previewMaximized }" role="dialog" aria-modal="true" tabindex="-1" :aria-label="`${selectedPageTitle || selectedCapture.filename}のプレビュー`" @keydown="onModalKeydown">
+        <header><div><h2>{{ selectedPageTitle || selectedCapture.filename }}</h2><p v-if="selectedPageUrl" class="preview-url" :title="selectedPageUrl">{{ selectedPageUrl }}</p><p class="preview-meta"><span class="preview-filename" :title="selectedCapture.filename">{{ selectedCapture.filename }}</span><span class="preview-size"> · {{ selectedCapture.sizeLabel || 'サイズ未特定' }} · {{ selectedCapture.width || '—' }} × {{ selectedCapture.height || '—' }}</span><span class="preview-bytes"> · {{ formatBytes(selectedCapture.bytes) }}</span></p></div><button type="button" :aria-label="previewMaximized ? '元のサイズに戻す' : 'ウィンドウいっぱいに表示'" :title="previewMaximized ? '元のサイズに戻す' : 'ウィンドウいっぱいに表示'" :aria-pressed="previewMaximized" @click="previewMaximized = !previewMaximized"><AppIcon :name="previewMaximized ? 'restore' : 'maximize'" /></button><button type="button" aria-label="プレビューを閉じる" @click="closePreview"><AppIcon name="close" /></button></header>
+        <div class="preview-toolbar"><div v-if="selectedImageUrl || previewPending || previewError" class="preview-controls" aria-label="画像表示"><span>表示:</span><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'fit' }" :aria-pressed="previewImageMode === 'fit'" @click="previewImageMode = 'fit'">全体</button><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'actual' }" :aria-pressed="previewImageMode === 'actual'" @click="previewImageMode = 'actual'">100%</button><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'width' }" :aria-pressed="previewImageMode === 'width'" @click="previewImageMode = 'width'">左右いっぱい</button><span v-if="previewImageLoaded && previewImage" class="preview-natural-size">{{ previewImage.naturalWidth }} × {{ previewImage.naturalHeight }}px</span></div><div class="preview-actions"><button class="primary" type="button" :disabled="!isTauri || !selectedCapture.path" @click="openCapture(selectedCapture)">元画像を開く</button><button type="button" :disabled="!isTauri || !selectedCapture.path" @click="revealCapture(selectedCapture)">Finderで表示</button></div></div>
+        <div class="preview-image-area"><div class="preview-image-wrap" :class="{ 'is-actual': previewImageMode === 'actual', 'is-width': previewImageMode === 'width' }"><div v-if="previewPending" class="preview-loading" role="status" aria-live="polite">読み込み中…</div><img v-else-if="selectedImageUrl" ref="previewImage" :style="previewImageMode === 'width' && previewImageLoaded && previewImage ? { width: `min(100%, ${previewImage.naturalWidth}px)` } : undefined" :src="selectedImageUrl" :alt="`${selectedCapture.filename}のプレビュー`" @load="handlePreviewImageLoad" @error="handlePreviewImageError" /><div v-else-if="previewError" class="preview-error"><strong>プレビューを読み込めませんでした</strong><span>{{ previewError }}</span><small>元画像を開くか、Finderで表示してください。</small><button v-if="selectedCapture.path" type="button" @click="retryPreview">再試行</button></div><div v-else-if="!isTauri" class="mock-page large"><span></span><i></i><b></b><em></em></div><div v-else class="preview-error"><strong>プレビュー画像がありません</strong><span>このキャプチャには表示可能な画像がありません。</span></div></div>
+        <button class="preview-arrow is-previous" type="button" :disabled="!canShowPreviousPreview" aria-label="前の画像" title="前の画像（←）" @click="navigatePreview(-1)"><AppIcon name="previous" /></button><button class="preview-arrow is-next" type="button" :disabled="!canShowNextPreview" aria-label="次の画像" title="次の画像（→）" @click="navigatePreview(1)"><AppIcon name="next" /></button></div>
+        <footer><nav class="preview-navigation" aria-label="画像の移動"><span v-if="selectedPreviewIndex >= 0" aria-live="polite">{{ selectedPreviewIndex + 1 }} / {{ previewEntries.length }}</span></nav></footer>
       </section>
     </div>
   </main>
