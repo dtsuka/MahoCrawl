@@ -4,6 +4,7 @@ version = "0.2.2"
 description = "MahoCrawl website capture workspace"
 authors = ["MahoCrawl"]
 edition = "2021"
+license = "MIT"
 
 [lib]
 name = "maho_crawl_lib"
