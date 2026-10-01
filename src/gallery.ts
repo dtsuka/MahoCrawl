@@ -51,7 +51,7 @@ function matchesAllTerms(text: string, terms: string[]): boolean {
  * `captureBySize` entry. Real captures use their path. Browser/demo captures
  * can intentionally have no path, so those use filename + size id instead.
  */
-function captureKey(capture: CaptureItem, sizeIdHint?: string): string | null {
+export function captureIdentity(capture: CaptureItem, sizeIdHint?: string): string | null {
   if (capture.path.length > 0) return `path\u0000${capture.path}`
 
   const filename = capture.filename
@@ -60,29 +60,27 @@ function captureKey(capture: CaptureItem, sizeIdHint?: string): string | null {
   return `filename\u0000${filename}\u0000${sizeId}`
 }
 
-/**
- * Build the capture -> page text index once per search. This keeps a search
- * from repeatedly walking every page for every capture.
- */
-function buildCapturePageIndex(pages: SeoPageItem[]): Map<string, string> {
-  const index = new Map<string, string>()
-
+/** 明示された対応表を検索とプレビューで共用する。 */
+export function buildCapturePageIndex(pages: SeoPageItem[]): Map<string, SeoPageItem[]> {
+  const index = new Map<string, SeoPageItem[]>()
   for (const page of pages) {
-    const mappings = page.captureBySize
-    if (!mappings) continue
-    const searchablePage = pageSearchText(page)
-    for (const [sizeId, mappedCapture] of Object.entries(mappings)) {
-      if (!mappedCapture) continue
-      const key = captureKey(mappedCapture, sizeId)
+    for (const [sizeId, capture] of Object.entries(page.captureBySize ?? {})) {
+      if (!capture) continue
+      const key = captureIdentity(capture, sizeId)
       if (!key) continue
-      const previous = index.get(key)
-      // Multiple explicit mappings are retained in the searchable text. This
-      // does not guess an association; it reflects all explicit entries.
-      index.set(key, previous ? `${previous}\u0000${searchablePage}` : searchablePage)
+      const mapped = index.get(key) ?? []
+      if (!mapped.includes(page)) mapped.push(page)
+      index.set(key, mapped)
     }
   }
-
   return index
+}
+
+/** 対応が一意なキャプチャのページだけを返す。 */
+export function pageForCapture(capture: CaptureItem, index: Map<string, SeoPageItem[]>): SeoPageItem | null {
+  const key = captureIdentity(capture)
+  const pages = key ? index.get(key) : undefined
+  return pages?.length === 1 ? pages[0]! : null
 }
 
 /**
@@ -95,8 +93,8 @@ export function searchCaptures(items: CaptureItem[], pages: SeoPageItem[], query
 
   const pageIndex = buildCapturePageIndex(pages)
   return items.filter((capture) => {
-    const key = captureKey(capture)
-    const mappedPage = key ? pageIndex.get(key) || '' : ''
+    const key = captureIdentity(capture)
+    const mappedPage = key ? (pageIndex.get(key) ?? []).map((page) => pageSearchText(page)).join('\u0000') : ''
     const captureText = [capture.filename, capture.sizeLabel, mappedPage]
       .filter((field): field is string => typeof field === 'string' && field.length > 0)
       .join('\u0000')
