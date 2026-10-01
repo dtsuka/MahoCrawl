@@ -1,4 +1,4 @@
-import type { CaptureItem, SeoPageItem } from './types'
+import type { CaptureItem, CaptureViewport, SeoPageItem } from './types'
 
 /**
  * Fields that are useful when looking for a page in either gallery view.
@@ -166,4 +166,16 @@ export function sortSeoPages(pages: SeoPageItem[], order: SeoPageSortOrder): Seo
       return left.index - right.index
     })
     .map(({ page }) => page)
+}
+
+
+/** Prefer the explicit capture mapping over configuration and aligned report labels. */
+export function pageSizeOptions(page: SeoPageItem, sizes: CaptureViewport[]): Array<{ id: string; label: string }> {
+  return page.sizeIds.map((id, index) => ({
+    id,
+    label: page.captureBySize?.[id]?.sizeLabel?.trim()
+      || sizes.find((size) => size.id === id)?.label?.trim()
+      || (page.sizeIds.length === page.sizeLabels.length ? page.sizeLabels[index]?.trim() : '')
+      || id,
+  }))
 }
