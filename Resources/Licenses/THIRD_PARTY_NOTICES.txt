@@ -23,10 +23,13 @@ Customization: ScopedCredentials and origin-limited Fetch.authRequired handling.
 
 Chrome DevTools Protocol definitions
 ------------------------------------
-Copyright The Chromium Authors
-License: BSD-style (see Chromium project)
+Copyright 2014 The Chromium Authors
+License: BSD-3-Clause
+Source: https://github.com/ChromeDevTools/devtools-protocol
 
 Other dependencies
 ------------------
-See the upstream SiteOne Crawler and chromiumoxide repositories for their full
-dependency license inventories.
+The full license texts of all third-party components bundled in MahoCrawl
+(Rust crates linked into MahoCrawl and SiteOne Crawler, the Chrome DevTools
+Protocol definitions, and npm packages bundled into the frontend) are listed
+in THIRD_PARTY_LICENSES.txt.
