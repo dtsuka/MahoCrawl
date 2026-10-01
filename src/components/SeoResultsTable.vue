@@ -1,13 +1,17 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
+import { externalUrl } from '../urls'
 import type { CaptureViewport, SeoPageItem } from '../types'
 
 const props = defineProps<{
   pages: SeoPageItem[]
   sizes: CaptureViewport[]
+  activePageUrl?: string
+  activeSizeId?: string | null
 }>()
 
 const emit = defineEmits<{
+  (event: 'open-url', url: string): void
   (event: 'open-capture', page: SeoPageItem, sizeId: string, opener: EventTarget | null): void
 }>()
 
@@ -220,9 +224,10 @@ function headingValues(page: SeoPageItem): Array<{ label: string; value: string 
         </thead>
         <tbody>
           <template v-for="(page, index) in props.pages" :key="page.url">
-            <tr class="result-row">
+            <tr class="result-row" :class="{ 'is-active': page.url === activePageUrl }">
               <th scope="row" class="url-cell">
-                <span class="cell-text url-text" :title="valueOrMissing(page.url)">{{ valueOrMissing(page.url) }}</span>
+                <a v-if="externalUrl(page.url)" class="cell-text url-text url-link" :href="externalUrl(page.url)!" :title="page.url" @click.prevent="emit('open-url', externalUrl(page.url)!)">{{ page.url.trim() }}</a>
+                <span v-else class="cell-text url-text" :title="valueOrMissing(page.url)">{{ valueOrMissing(page.url) }}</span>
                 <button
                   class="detail-toggle"
                   type="button"
@@ -242,6 +247,7 @@ function headingValues(page: SeoPageItem): Array<{ label: string; value: string 
                     v-for="size in pageSizeOptions(page)"
                     :key="size.id"
                     class="size-button"
+                    :class="{ 'is-active': page.url === activePageUrl && size.id === activeSizeId }"
                     type="button"
                     :aria-label="`${valueOrMissing(page.url)}の${size.label}キャプチャを表示`"
                     @click.stop="openCapture(page, size.id, $event)"
@@ -488,6 +494,14 @@ function headingValues(page: SeoPageItem): Array<{ label: string; value: string 
   text-align: left;
   transition: border-color .15s ease, background-color .15s ease, color .15s ease, box-shadow .15s ease;
 }
+
+.results-table tbody tr.result-row.is-active > th,
+.results-table tbody tr.result-row.is-active > td { background: #eef5ff; }
+
+.size-button.is-active { border-color: #2878ed; background: #d7e7ff; box-shadow: 0 0 0 1px #2878ed; }
+.url-link { color: #2367bd; text-decoration: none; }
+.url-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+.url-link:focus-visible { outline: 2px solid #2878ed; outline-offset: 2px; }
 
 .size-button:hover {
   border-color: #8fb7ec;
