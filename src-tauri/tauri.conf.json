@@ -42,6 +42,7 @@
       "../Resources/Binaries/checksums.sha256",
       "../Resources/Licenses/SiteOne-Crawler-LICENSE.txt",
       "../Resources/Licenses/THIRD_PARTY_NOTICES.txt",
+      "../Resources/Licenses/THIRD_PARTY_LICENSES.txt",
       "../Resources/Binaries/BUILD_METADATA.json"
     ],
     "macOS": {
