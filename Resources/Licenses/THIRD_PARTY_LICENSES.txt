@@ -6085,7 +6085,7 @@ developed by Chen Jiaju, licensed under the MIT License and the Apache License 2
 --------------------------------------------------------------------------------
 License: MIT License (MIT)
 Used by:
-  - maho-crawl 0.2.2
+  - maho-crawl 0.3.0
   - block2 0.6.2 <https://github.com/madsmtm/objc2>
   - dpi 0.1.2 <https://github.com/rust-windowing/winit>
   - objc2-encode 4.1.0 <https://github.com/madsmtm/objc2>
