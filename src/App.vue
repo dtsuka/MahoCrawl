@@ -14,6 +14,7 @@ import {
   readCapture,
   readCaptureThumbnail,
   openPath,
+  openExternalUrl,
   revealPath,
   saveConfiguration,
   selectOutputFolder,
@@ -43,9 +44,10 @@ import {
   type ScanRunSummary,
   type SeoPageItem,
 } from './types'
-import { searchCaptures, searchSeoPages, sortSeoPages, type SeoPageSortOrder } from './gallery'
+import { buildCapturePageIndex, captureIdentity, pageForCapture, searchCaptures, searchSeoPages, sortSeoPages, type SeoPageSortOrder } from './gallery'
 import SeoResultsTable from './components/SeoResultsTable.vue'
 import AppIcon from './components/AppIcon.vue'
+import { externalUrl } from './urls'
 
 const LOCAL_STORAGE_KEY = 'maho-crawl.configuration.v1'
 const GALLERY_VIEW_STORAGE_KEY = 'maho-crawl.gallery-view.v1'
@@ -70,9 +72,18 @@ const seoPages = ref<SeoPageItem[]>([])
 const seoLoading = ref(false)
 const previewUrls = reactive<Record<string, string>>({})
 const thumbnailLoading = reactive(new Set<string>())
+const galleryWorkspace = ref<HTMLElement | null>(null)
+const activeCapture = ref<CaptureItem | null>(null)
+const activePageUrl = ref('')
+const activeSizeId = ref<string | null>(null)
+const capturePageIndex = computed(() => buildCapturePageIndex(seoPages.value))
 const selectedCapture = ref<CaptureItem | null>(null)
 const selectedPageTitle = ref('')
 const selectedPageUrl = ref('')
+const displayedPreviewUrl = computed(() => selectedPageUrl.value
+  || (selectedCapture.value ? captureContext(selectedCapture.value).pageUrl : '') || '')
+const displayedActivePageUrl = computed(() => activeCapture.value
+  ? activePageUrl.value || captureContext(activeCapture.value).pageUrl : undefined)
 const selectedImageUrl = ref('')
 const previewError = ref('')
 const previewPending = ref(false)
@@ -234,7 +245,7 @@ const visibleSeoPages = computed(() => {
 })
 const previewEntries = computed<PreviewEntry[]>(() => {
   if (galleryView.value === 'grid') {
-    return visibleCaptures.value.map((capture) => ({ capture, context: {} }))
+    return visibleCaptures.value.map((capture) => ({ capture, context: captureContext(capture) }))
   }
   return visibleSeoPages.value.flatMap((page) => page.sizeIds.map((sizeId) => seoPreviewEntry(page, sizeId)))
 })
@@ -389,6 +400,9 @@ function clearPreviewState(): void {
 }
 
 function resetRunArtifacts(): void {
+  activeCapture.value = null
+  activePageUrl.value = ''
+  activeSizeId.value = null
   capturesRefreshToken += 1
   seoRefreshToken += 1
   captures.value = []
@@ -652,6 +666,39 @@ function captureThumbnailLoading(capture: CaptureItem): boolean {
   return thumbnailLoading.has(captureKey(capture))
 }
 
+function captureContext(capture: CaptureItem): PreviewContext {
+  const page = pageForCapture(capture, capturePageIndex.value)
+  return page ? { pageTitle: page.title || page.url, pageUrl: page.url } : {}
+}
+
+function captureSiteUrl(capture: CaptureItem): string | null {
+  const page = pageForCapture(capture, capturePageIndex.value)
+  return page ? externalUrl(page.url) : null
+}
+
+function isActiveCapture(capture: CaptureItem): boolean {
+  const key = captureIdentity(capture)
+  return Boolean(key && activeCapture.value && key === captureIdentity(activeCapture.value))
+}
+
+function activeGalleryElement(): HTMLElement | null {
+  return galleryWorkspace.value?.querySelector<HTMLElement>(galleryView.value === 'grid'
+    ? '.capture-card.is-active' : '.size-button.is-active') ?? null
+}
+
+async function revealActiveCapture(): Promise<void> {
+  if (galleryView.value === 'grid') {
+    const index = visibleCaptures.value.findIndex(isActiveCapture)
+    if (index >= 0) capturePage.value = Math.floor(index / CAPTURE_PAGE_SIZE) + 1
+  }
+  await nextTick()
+  activeGalleryElement()?.scrollIntoView?.({ block: 'nearest' })
+}
+
+async function openSiteUrl(url: string): Promise<void> {
+  try { await openExternalUrl(url) } catch (error) { errorMessage.value = String(error) }
+}
+
 function rememberPreviewOpener(target?: EventTarget | null): void {
   const candidate = target as (HTMLElement & { focus?: () => void }) | null | undefined
   if (candidate && typeof candidate.focus === 'function') {
@@ -677,8 +724,10 @@ function previewEntryMatches(entry: PreviewEntry, request: PreviewRequest): bool
   return entry.capture.path === request.path
     && entry.capture.filename === request.filename
     && (entry.context.sizeId ?? entry.capture.sizeId) === request.sizeId
-    && (entry.context.pageTitle || '') === request.pageTitle
-    && (entry.context.pageUrl || '') === request.pageUrl
+    && (galleryView.value === 'grid' || (
+      (entry.context.pageTitle || '') === request.pageTitle
+      && (entry.context.pageUrl || '') === request.pageUrl
+    ))
 }
 
 async function openCapturePreview(capture: CaptureItem, context: PreviewContext = {}, opener?: EventTarget | null): Promise<void> {
@@ -693,6 +742,9 @@ async function openCapturePreview(capture: CaptureItem, context: PreviewContext 
   }
   activePreviewRequest = request
   selectedCapture.value = capture
+  activeCapture.value = capture
+  activePageUrl.value = request.pageUrl
+  activeSizeId.value = request.sizeId
   selectedPageTitle.value = request.pageTitle
   selectedPageUrl.value = request.pageUrl
   selectedImageUrl.value = ''
@@ -700,7 +752,7 @@ async function openCapturePreview(capture: CaptureItem, context: PreviewContext 
   previewPending.value = Boolean(isTauri && capture.path && !context.initialError)
   previewImageLoaded.value = false
 
-  await nextTick()
+  await revealActiveCapture()
   if (!isCurrentPreview(request)) return
   previewModal.value?.focus()
   if (!isTauri || !capture.path || context.initialError) {
@@ -720,7 +772,7 @@ async function openCapturePreview(capture: CaptureItem, context: PreviewContext 
 }
 
 function openPreview(capture: CaptureItem, opener?: EventTarget | null): Promise<void> {
-  return openCapturePreview(capture, {}, opener)
+  return openCapturePreview(capture, captureContext(capture), opener)
 }
 
 function pageSizeOptions(page: SeoPageItem): Array<{ id: string; label: string }> {
@@ -815,7 +867,7 @@ function invalidatePreviewRequest(): void {
 }
 
 function closePreview(): void {
-  const opener = previewOpener.value
+  const opener = activeGalleryElement() || previewOpener.value
   clearPreviewState()
   if (opener?.isConnected) opener.focus()
 }
@@ -1255,6 +1307,8 @@ watch(configuration, () => {
   }
   void persist()
 }, { deep: true })
+watch(galleryView, () => { if (activeCapture.value) void revealActiveCapture() })
+
 watch(previewImageMode, (value) => {
   try { localStorage.setItem(PREVIEW_IMAGE_MODE_STORAGE_KEY, value) } catch { /* 表示設定の保存は任意 */ }
 })
@@ -1472,7 +1526,7 @@ onBeforeUnmount(() => {
 
       <nav class="tabs" aria-label="表示切替"><button type="button" :class="{ active: activeTab === 'captures' }" @click="activeTab = 'captures'">{{ runMetadataOnly ? 'メタ情報' : 'キャプチャ' }} <span v-if="runMetadataOnly ? seoPages.length : captures.length">{{ runMetadataOnly ? seoPages.length : captures.length }}</span></button><button type="button" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">ログ</button></nav>
 
-      <div v-if="activeTab === 'captures'" class="gallery-workspace">
+      <div v-if="activeTab === 'captures'" ref="galleryWorkspace" class="gallery-workspace">
         <div class="gallery-toolbar">
           <div class="filter-pills"><button v-for="option in filterOptions" :key="option.id" type="button" :class="{ active: captureFilter === option.id }" :aria-pressed="captureFilter === option.id" @click="captureFilter = option.id">{{ option.label }} <span>{{ option.count }}</span></button></div>
           <form class="gallery-search" role="search" @submit.prevent="applySearch">
@@ -1489,12 +1543,12 @@ onBeforeUnmount(() => {
         <div v-else-if="galleryView === 'list' && seoLoading && seoPages.length === 0" class="empty-state"><span class="empty-icon" aria-hidden="true"><span class="spinner"></span></span><h3>SEOデータを読み込んでいます</h3><p>レポートからページ情報を整理しています。</p></div>
         <div v-else-if="galleryView === 'list' && visibleSeoPages.length === 0" class="empty-state"><span class="empty-icon"><AppIcon name="list" /></span><h3>{{ searchQuery ? '検索結果がありません' : 'SEOデータは未取得です' }}</h3><p>{{ searchQuery ? 'URL・タイトル・SEO項目を確認してください。' : 'クロール完了後にSiteOneのJSONレポートから表示します。' }}</p><button v-if="searchQuery" type="button" class="empty-action" @click="clearSearch">検索を解除</button><button v-else-if="isTauri && !isBusy" type="button" class="empty-action" @click="focusTargetUrl">URLを入力する</button></div>
         <div v-else-if="galleryView === 'grid'" class="capture-grid">
-          <article v-for="capture in pagedVisibleCaptures" :key="capture.path || `${capture.filename}-${capture.sizeId || 'size'}`" class="capture-card" tabindex="0" @click="openPreview(capture, $event.currentTarget)" @dblclick="openCapture(capture)" @keydown.self.enter.prevent="openPreview(capture, $event.currentTarget)" @keydown.self.space.prevent="openPreview(capture, $event.currentTarget)">
+          <article v-for="capture in pagedVisibleCaptures" :key="capture.path || `${capture.filename}-${capture.sizeId || 'size'}`" class="capture-card" :class="{ 'is-active': isActiveCapture(capture) }" :aria-current="isActiveCapture(capture) ? 'true' : undefined" tabindex="0" @click="openPreview(capture, $event.currentTarget)" @dblclick="openCapture(capture)" @keydown.self.enter.prevent="openPreview(capture, $event.currentTarget)" @keydown.self.space.prevent="openPreview(capture, $event.currentTarget)">
             <div class="capture-thumb" :style="{ background: capturePreview(capture) }"><img v-if="captureImage(capture)" :src="captureImage(capture)" :alt="`${capture.filename}のプレビュー`" /><div v-else-if="!isTauri" class="mock-page"><span></span><i></i><b></b><em></em></div><div v-else-if="captureThumbnailLoading(capture)" class="capture-thumb-state" role="status">画像を読み込み中…</div><div v-else class="capture-thumb-state">画像未取得</div></div>
-            <div class="capture-meta"><div class="capture-file"><AppIcon class="device-icon" :name="capture.width && capture.width > 1000 ? 'desktop' : 'mobile'" /><span class="truncate">{{ capture.filename }}</span></div><div class="capture-tags"><span class="size-tag" :class="capture.sizeId">{{ capture.sizeLabel || 'サイズ' }}</span><span>{{ capture.width }} × {{ capture.height }}</span></div><div class="capture-bottom"><span>{{ formatBytes(capture.bytes) }}</span><span class="capture-actions"><button type="button" @click.stop="openCapture(capture)" :disabled="!isTauri" aria-label="元画像を開く"><AppIcon name="external" /></button><button type="button" @click.stop="revealCapture(capture)" :disabled="!isTauri" aria-label="Finderで表示"><AppIcon name="folder" /></button></span></div></div>
+            <div class="capture-meta"><div class="capture-file"><AppIcon class="device-icon" :name="capture.width && capture.width > 1000 ? 'desktop' : 'mobile'" /><span class="truncate">{{ capture.filename }}</span></div><div class="capture-tags"><span class="size-tag" :class="capture.sizeId">{{ capture.sizeLabel || 'サイズ' }}</span><span>{{ capture.width }} × {{ capture.height }}</span></div><div class="capture-bottom"><span>{{ formatBytes(capture.bytes) }}</span><span class="capture-actions"><button type="button" @click.stop="openSiteUrl(captureSiteUrl(capture)!)" @dblclick.stop :disabled="!captureSiteUrl(capture)" aria-label="サイトを開く" title="サイトを開く"><AppIcon name="globe" /></button><button type="button" @click.stop="openCapture(capture)" :disabled="!isTauri" aria-label="元画像を開く"><AppIcon name="external" /></button><button type="button" @click.stop="revealCapture(capture)" :disabled="!isTauri" aria-label="Finderで表示"><AppIcon name="folder" /></button></span></div></div>
           </article>
         </div>
-        <SeoResultsTable v-else :pages="visibleSeoPages" :sizes="gallerySizes" @open-capture="openSeoCapture" />
+        <SeoResultsTable v-else :pages="visibleSeoPages" :sizes="gallerySizes" :active-page-url="displayedActivePageUrl" :active-size-id="activeSizeId" @open-url="openSiteUrl" @open-capture="openSeoCapture" />
         <footer class="gallery-footer"><template v-if="galleryView === 'grid'"><span>{{ visibleCaptures.length }}件のキャプチャ</span><span v-if="enabledSizes.length"> · {{ enabledSizes.length }}サイズを順次処理</span><nav v-if="capturePageCount > 1" class="pagination" aria-label="キャプチャページ"><button type="button" :disabled="capturePage <= 1" aria-label="前のページ" @click="setCapturePage(capturePage - 1)"><AppIcon name="previous" /></button><span>{{ capturePage }} / {{ capturePageCount }}</span><button type="button" :disabled="capturePage >= capturePageCount" aria-label="次のページ" @click="setCapturePage(capturePage + 1)"><AppIcon name="next" /></button></nav></template><template v-else>{{ visibleSeoPages.length }}件のページ · SEO概要</template></footer>
       </div>
       <div v-else class="log-workspace"><div class="log-toolbar"><span>実行ログ</span><button type="button" :disabled="!logText" @click="clearLog().then(() => { logText = '' })">ログを消去</button></div><pre>{{ logText || 'クロールを開始するとログが表示されます。' }}</pre></div>
@@ -1529,8 +1583,8 @@ onBeforeUnmount(() => {
     </div>
     <div v-if="selectedCapture" class="preview-backdrop" :class="{ 'is-maximized': previewMaximized }" role="presentation" @click.self="closePreview">
       <section ref="previewModal" class="preview-modal" :class="{ 'is-maximized': previewMaximized }" role="dialog" aria-modal="true" tabindex="-1" :aria-label="`${selectedPageTitle || selectedCapture.filename}のプレビュー`" @keydown="onModalKeydown">
-        <header><div><h2>{{ selectedPageTitle || selectedCapture.filename }}</h2><p v-if="selectedPageUrl" class="preview-url" :title="selectedPageUrl">{{ selectedPageUrl }}</p><p class="preview-meta"><span class="preview-filename" :title="selectedCapture.filename">{{ selectedCapture.filename }}</span><span class="preview-size"> · {{ selectedCapture.sizeLabel || 'サイズ未特定' }} · {{ selectedCapture.width || '—' }} × {{ selectedCapture.height || '—' }}</span><span class="preview-bytes"> · {{ formatBytes(selectedCapture.bytes) }}</span></p></div><button type="button" :aria-label="previewMaximized ? '元のサイズに戻す' : 'ウィンドウいっぱいに表示'" :title="previewMaximized ? '元のサイズに戻す' : 'ウィンドウいっぱいに表示'" :aria-pressed="previewMaximized" @click="previewMaximized = !previewMaximized"><AppIcon :name="previewMaximized ? 'restore' : 'maximize'" /></button><button type="button" aria-label="プレビューを閉じる" @click="closePreview"><AppIcon name="close" /></button></header>
-        <div class="preview-toolbar"><div v-if="selectedImageUrl || previewPending || previewError" class="preview-controls" aria-label="画像表示"><span>表示:</span><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'fit' }" :aria-pressed="previewImageMode === 'fit'" @click="previewImageMode = 'fit'">全体</button><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'actual' }" :aria-pressed="previewImageMode === 'actual'" @click="previewImageMode = 'actual'">100%</button><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'width' }" :aria-pressed="previewImageMode === 'width'" @click="previewImageMode = 'width'">左右いっぱい</button><span v-if="previewImageLoaded && previewImage" class="preview-natural-size">{{ previewImage.naturalWidth }} × {{ previewImage.naturalHeight }}px</span></div><div class="preview-actions"><button class="primary" type="button" :disabled="!isTauri || !selectedCapture.path" @click="openCapture(selectedCapture)">元画像を開く</button><button type="button" :disabled="!isTauri || !selectedCapture.path" @click="revealCapture(selectedCapture)">Finderで表示</button></div></div>
+        <header><div><h2>{{ selectedPageTitle || selectedCapture.filename }}</h2><a v-if="externalUrl(displayedPreviewUrl)" class="preview-url" :href="externalUrl(displayedPreviewUrl)!" :title="displayedPreviewUrl" @click.prevent="openSiteUrl(displayedPreviewUrl)"><span>{{ displayedPreviewUrl }}</span><AppIcon name="external" /></a><p v-else-if="displayedPreviewUrl" class="preview-url">{{ displayedPreviewUrl }}</p><p class="preview-meta"><span class="preview-filename" :title="selectedCapture.filename">{{ selectedCapture.filename }}</span><span class="preview-size"> · {{ selectedCapture.sizeLabel || 'サイズ未特定' }} · {{ selectedCapture.width || '—' }} × {{ selectedCapture.height || '—' }}</span><span class="preview-bytes"> · {{ formatBytes(selectedCapture.bytes) }}</span></p></div><button type="button" :aria-label="previewMaximized ? '元のサイズに戻す' : 'ウィンドウいっぱいに表示'" :title="previewMaximized ? '元のサイズに戻す' : 'ウィンドウいっぱいに表示'" :aria-pressed="previewMaximized" @click="previewMaximized = !previewMaximized"><AppIcon :name="previewMaximized ? 'restore' : 'maximize'" /></button><button type="button" aria-label="プレビューを閉じる" @click="closePreview"><AppIcon name="close" /></button></header>
+        <div class="preview-toolbar"><div v-if="selectedImageUrl || previewPending || previewError" class="preview-controls" aria-label="画像表示"><span>表示:</span><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'fit' }" :aria-pressed="previewImageMode === 'fit'" @click="previewImageMode = 'fit'">全体</button><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'actual' }" :aria-pressed="previewImageMode === 'actual'" @click="previewImageMode = 'actual'">100%</button><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'width' }" :aria-pressed="previewImageMode === 'width'" @click="previewImageMode = 'width'">幅100%</button><span v-if="previewImageLoaded && previewImage" class="preview-natural-size">{{ previewImage.naturalWidth }} × {{ previewImage.naturalHeight }}px</span></div><div class="preview-actions"><button class="primary" type="button" :disabled="!isTauri || !selectedCapture.path" @click="openCapture(selectedCapture)">元画像を開く</button><button type="button" :disabled="!isTauri || !selectedCapture.path" @click="revealCapture(selectedCapture)">Finderで表示</button></div></div>
         <div class="preview-image-area"><div class="preview-image-wrap" :class="{ 'is-actual': previewImageMode === 'actual', 'is-width': previewImageMode === 'width' }"><div v-if="previewPending" class="preview-loading" role="status" aria-live="polite">読み込み中…</div><img v-else-if="selectedImageUrl" ref="previewImage" :style="previewImageMode === 'width' && previewImageLoaded && previewImage ? { width: `min(100%, ${previewImage.naturalWidth}px)` } : undefined" :src="selectedImageUrl" :alt="`${selectedCapture.filename}のプレビュー`" @load="handlePreviewImageLoad" @error="handlePreviewImageError" /><div v-else-if="previewError" class="preview-error"><strong>プレビューを読み込めませんでした</strong><span>{{ previewError }}</span><small>元画像を開くか、Finderで表示してください。</small><button v-if="selectedCapture.path" type="button" @click="retryPreview">再試行</button></div><div v-else-if="!isTauri" class="mock-page large"><span></span><i></i><b></b><em></em></div><div v-else class="preview-error"><strong>プレビュー画像がありません</strong><span>このキャプチャには表示可能な画像がありません。</span></div></div>
         <button class="preview-arrow is-previous" type="button" :disabled="!canShowPreviousPreview" aria-label="前の画像" title="前の画像（←）" @click="navigatePreview(-1)"><AppIcon name="previous" /></button><button class="preview-arrow is-next" type="button" :disabled="!canShowNextPreview" aria-label="次の画像" title="次の画像（→）" @click="navigatePreview(1)"><AppIcon name="next" /></button></div>
         <footer><nav class="preview-navigation" aria-label="画像の移動"><span v-if="selectedPreviewIndex >= 0" aria-live="polite">{{ selectedPreviewIndex + 1 }} / {{ previewEntries.length }}</span></nav></footer>
