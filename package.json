@@ -9,6 +9,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "build:siteone": "bash scripts/build-siteone-custom.sh",
     "build:app": "bash scripts/generate-third-party-licenses.sh && bash scripts/with-remapped-paths.sh tauri build --bundles app && bash scripts/copy-macos-app.sh",
+    "build:release": "bash scripts/generate-third-party-licenses.sh && bash scripts/build-release-zips.sh",
     "licenses": "bash scripts/generate-third-party-licenses.sh",
     "preview": "vite preview",
     "test": "vitest run",
