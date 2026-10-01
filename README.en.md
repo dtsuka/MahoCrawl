@@ -99,7 +99,7 @@ When only metadata is collected, the reports are saved in the `metadata/` folder
 
 ## For developers
 
-To build from source, develop, test, or publish a release, see the [Development and Build Guide](docs/DEVELOPMENT.md) (in Japanese).
+To build from source, develop, test, or publish a release, see the [Development and Build Guide](docs/DEVELOPMENT.en.md).
 
 ## License
 
