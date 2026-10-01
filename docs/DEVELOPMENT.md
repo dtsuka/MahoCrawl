@@ -6,11 +6,12 @@
 
 ## 構成
 
-MahoCrawl は、SiteOne Crawler v2.5.1 を安全な Tauri v2 bridge から呼び出す macOS 向けアプリです。UI は Vue 3 + TypeScript + Vite で構成しています。
+MahoCrawl は、SiteOne Crawler v2.5.1 を安全な Tauri v2 bridge から呼び出す macOS / Windows 向けアプリです。UI は Vue 3 + TypeScript + Vite で構成しています。
 
 - `src/`: Vue 3 UI、設定 CRUD、ギャラリー、ログ、フロント側検証
 - `src-tauri/src/lib.rs`: 設定永続化、入力検証、SiteOne の限定コマンド、sidecar process state、イベント配信、キャプチャ列挙
-- `src-tauri/binaries/`: Tauri externalBin 規約に合わせた arm64 / x86_64 の SiteOne Crawler（`npm run build:siteone` で生成。Git 管理対象外）
+- `src-tauri/src/platform.rs`: ホームディレクトリ、sidecar 名、子プロセスの起動・停止など OS ごとに異なる処理
+- `src-tauri/binaries/`: Tauri externalBin 規約に合わせた macOS（arm64 / x86_64）と Windows（x86_64）の SiteOne Crawler（`npm run build:siteone` で生成。Git 管理対象外）
 - `patches/`: SiteOne Crawler / chromiumoxide へのカスタムパッチ
 - `Resources/Licenses/`: 同梱 SiteOne Crawler のライセンスと第三者ライセンス一覧
 - `scripts/`: SiteOne のビルド、ライセンス一覧の生成、リリース用ビルドなどの補助スクリプト
@@ -84,15 +85,25 @@ GitHub Releases 掲載用の zip は次で作成します。Apple Silicon 版と
 npm run build:release
 ```
 
-アプリは ad-hoc 署名（`tauri.conf.json` の `signingIdentity: "-"`）されますが、Developer ID 署名と公証は行いません。リリース手順は次のとおりです。
+macOS 版のアプリは ad-hoc 署名（`tauri.conf.json` の `signingIdentity: "-"`）されますが、Developer ID 署名と公証は行いません。
 
-1. `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` のバージョンを更新してコミットする
-2. `npm run build:release` で zip を作成する
-3. GitHub Release を作成して zip を添付する
+Windows 版（NSIS インストーラー）は GitHub Actions（`.github/workflows/windows.yml`）でビルドします。`v*` タグを push すると、Windows 上で SiteOne Crawler とアプリをビルドし、`MahoCrawl_<version>_x64-setup.exe` を GitHub Release に添付します（Release が無い場合は下書きを作成します）。Actions の画面から手動実行した場合は、Artifacts としてダウンロードできます。
+
+リリース手順は次のとおりです。
+
+1. `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` のバージョンを更新してコミットし、push する
+2. タグを作成して push する（Windows 版のビルドが始まる）
+3. `npm run build:release` で macOS 版の zip を作成し、Release に添付する
+4. Windows 版の添付を確認したら、リリースノートを書いて公開する
 
 ```bash
-gh release create v<version> release/MahoCrawl_<version>_aarch64.zip release/MahoCrawl_<version>_x86_64.zip --title "MahoCrawl v<version>"
+git tag v<version>
+git push origin v<version>
+npm run build:release
+gh release upload v<version> release/MahoCrawl_<version>_aarch64.zip release/MahoCrawl_<version>_x86_64.zip
 ```
+
+Windows 版の Release が下書きとして作られた場合は、`gh release edit v<version> --draft=false` で公開します。
 
 ### Developer ID 署名と公証
 
@@ -126,6 +137,11 @@ Tauri externalBin は次のターゲット名を使用します。
 
 - `siteone-crawler-aarch64-apple-darwin`
 - `siteone-crawler-x86_64-apple-darwin`
+- `siteone-crawler-x86_64-pc-windows-msvc.exe`
+
+ビルド対象は、macOS では Apple Silicon / Intel、Windows（Git Bash）では x86_64 が既定です。`SITEONE_TARGETS` 環境変数（空白区切り）で変更できます。
+
+Windows ではクロールの停止時に `taskkill /T /F` で SiteOne Crawler と子プロセス（Chrome など）をまとめて終了します。macOS ではプロセスグループに SIGINT を送り、終了しない場合に SIGKILL を送ります。
 
 更新後は `siteone-crawler-* --version`、`cargo test`、`npm run build`、`cargo check` を実行してください。SiteOne の CLI に存在しない独自フラグは渡しません。現在の v2.5.1 には cookie banner 専用 CLI フラグがないため、設定値は保存しつつ、UI では「現在未対応」と明示して操作を無効化しています。
 
