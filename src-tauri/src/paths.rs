@@ -457,14 +457,29 @@ mod tests {
                 .format("%Y%m%d-%H%M%S")
         )));
         assert_eq!(plans.len(), 3);
-        assert!(plans[0].captures.ends_with("desktop-1440x900/screenshots"));
-        assert!(plans[0]
-            .http_cache_dir
-            .ends_with("desktop-1440x900/.siteone-http-cache"));
-        assert!(plans[1]
-            .html_report
-            .ends_with("tablet-768x1024/report.html"));
-        assert!(plans[2].json_report.ends_with("mobile-390x844/report.json"));
+        let ends_with = |path: &str, parent: &str, name: &str| {
+            Path::new(path).ends_with(Path::new(parent).join(name))
+        };
+        assert!(ends_with(
+            &plans[0].captures,
+            "desktop-1440x900",
+            "screenshots"
+        ));
+        assert!(ends_with(
+            &plans[0].http_cache_dir,
+            "desktop-1440x900",
+            ".siteone-http-cache"
+        ));
+        assert!(ends_with(
+            &plans[1].html_report,
+            "tablet-768x1024",
+            "report.html"
+        ));
+        assert!(ends_with(
+            &plans[2].json_report,
+            "mobile-390x844",
+            "report.json"
+        ));
     }
     #[test]
     fn canonical_open_boundary_rejects_parent_and_accepts_nested_file() {
