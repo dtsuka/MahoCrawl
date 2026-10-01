@@ -16,6 +16,7 @@ const bridgeMock = vi.hoisted(() => ({
   loadScanRun: vi.fn(),
   loadConfiguration: vi.fn(),
   openPath: vi.fn(),
+  openExternalUrl: vi.fn(),
   readCapture: vi.fn(),
   readCaptureThumbnail: vi.fn(),
   revealPath: vi.fn(),
@@ -87,6 +88,7 @@ describe('settings sidebar', () => {
   bridgeMock.loadScanRun.mockReset()
   bridgeMock.loadConfiguration.mockReset()
   bridgeMock.openPath.mockReset()
+  bridgeMock.openExternalUrl.mockReset()
   bridgeMock.readCapture.mockReset()
   bridgeMock.readCaptureThumbnail.mockReset()
   bridgeMock.revealPath.mockReset()
@@ -100,6 +102,73 @@ describe('settings sidebar', () => {
   bridgeMock.subscribeStatus.mockReset()
   bridgeMock.validateConfigurationRust.mockReset()
 })
+
+  it('opens mapped URLs from grid, modal and rows, and reports failures', async () => {
+    const wrapper = await mountApp()
+    const button = wrapper.find('.capture-card button[aria-label="サイトを開く"]')
+    expect(button.exists()).toBe(true)
+    await button.trigger('click')
+    expect(bridgeMock.openExternalUrl).toHaveBeenCalledWith('https://example.com/')
+    expect(wrapper.find('.preview-modal').exists()).toBe(false)
+    await wrapper.find('.capture-card').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.preview-url').text()).toContain('https://example.com/')
+    await wrapper.find('.preview-url').trigger('click')
+    expect(bridgeMock.openExternalUrl).toHaveBeenCalledTimes(2)
+    await wrapper.find('button[aria-label="プレビューを閉じる"]').trigger('click')
+    await wrapper.find('button[aria-label="行表示"]').trigger('click')
+    bridgeMock.openExternalUrl.mockRejectedValueOnce(new Error('サイトを開けません'))
+    await wrapper.find('.url-text').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('サイトを開けません')
+    wrapper.unmount()
+  })
+
+  it('retains active capture through navigation and close in both views', async () => {
+    const wrapper = await mountApp()
+    await wrapper.find('.capture-card').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.capture-card.is-active').attributes('aria-current')).toBe('true')
+    await wrapper.find('button[aria-label="次の画像"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.capture-card.is-active').text()).toContain('about-desktop.png')
+    await wrapper.find('.preview-modal').trigger('keydown', { key: 'ArrowLeft' })
+    await flushPromises()
+    await wrapper.find('button[aria-label="プレビューを閉じる"]').trigger('click')
+    expect(document.activeElement).toBe(wrapper.find('.capture-card.is-active').element)
+    await wrapper.find('button[aria-label="行表示"]').trigger('click')
+    expect(wrapper.find('tr.is-active .size-button.is-active').text()).toContain('Desktop')
+    await wrapper.findAll('.size-button')[1].trigger('click')
+    await flushPromises()
+    await wrapper.find('button[aria-label="プレビューを閉じる"]').trigger('click')
+    expect(document.activeElement).toBe(wrapper.find('.size-button.is-active').element)
+    wrapper.unmount()
+  })
+
+  it('matches paths before filenames, disables unmapped URLs and follows pagination', async () => {
+    const wrapper = await mountApp()
+    const vm = wrapper.vm as unknown as { captures: CaptureItem[]; seoPages: SeoPageItem[]; resetRunArtifacts: () => void }
+    const template = vm.captures[0]!
+    vm.captures = Array.from({ length: 51 }, (_, index) => ({ ...template, path: `/captures/${index}.png`, filename: `${index}.png`, modifiedAt: 100 - index }))
+    vm.seoPages = [{ ...vm.seoPages[0]!, captureBySize: { desktop: vm.captures[49]! } }]
+    const scroll = vi.fn()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { value: scroll, configurable: true })
+    await nextTick()
+    expect(wrapper.find('.capture-card button[aria-label="サイトを開く"]').attributes('disabled')).toBeDefined()
+    await wrapper.findAll('.capture-card')[49]!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.preview-url').exists()).toBe(true)
+    await wrapper.find('button[aria-label="次の画像"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.capture-card')).toHaveLength(1)
+    expect(wrapper.find('.capture-card.is-active').text()).toContain('50.png')
+    expect(scroll).toHaveBeenCalledWith({ block: 'nearest' })
+    vm.resetRunArtifacts()
+    await nextTick()
+    expect(wrapper.find('.is-active').exists()).toBe(false)
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
+    wrapper.unmount()
+  })
 
   it('uses accessible toggles that update each section visibility', async () => {
     const wrapper = await mountApp()
@@ -308,7 +377,7 @@ describe('settings sidebar', () => {
   it('switches all three image modes with accessible pressed states', async () => {
     const wrapper = await openLoadedPreview()
     const buttons = wrapper.findAll('.preview-controls button')
-    expect(buttons.map((button) => button.text())).toEqual(['全体', '100%', '左右いっぱい'])
+    expect(buttons.map((button) => button.text())).toEqual(['全体', '100%', '幅100%'])
     for (const [index, mode] of ['fit', 'actual', 'width'].entries()) {
       await buttons[index].trigger('click')
       expect(buttons.map((button) => button.attributes('aria-pressed'))).toEqual(
