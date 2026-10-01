@@ -87,7 +87,7 @@ To crawl a site protected by Basic authentication, enter the user name and passw
 
 ### About the browser
 
-MahoCrawl uses a Chromium-based browser installed on your Mac, such as Google Chrome, to take screenshots. If it cannot find one automatically, specify it in 「ブラウザのパス」 (Browser path). If you turn on 「見つからない場合に自動取得」 (Download automatically if not found), the app downloads a browser for capturing when none is found.
+MahoCrawl uses a Chromium-based browser installed on your computer, such as Google Chrome, to take screenshots. If it cannot find one automatically, specify it in 「ブラウザのパス」 (Browser path). If you turn on 「見つからない場合に自動取得」 (Download automatically if not found), the app downloads a browser for capturing when none is found.
 
 ## Output files
 
