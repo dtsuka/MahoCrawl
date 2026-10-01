@@ -802,7 +802,9 @@ mod tests {
             assert_eq!(plans.len(), 1);
             let plan = &plans[0];
             assert_eq!(plan.size_slug, "metadata");
-            assert!(plan.json_report.ends_with("metadata/report.json"));
+            assert!(
+                Path::new(&plan.json_report).ends_with(Path::new("metadata").join("report.json"))
+            );
             let arguments = build_arguments(&configuration, None, plan, "Asia/Tokyo").unwrap();
             assert!(!arguments
                 .iter()
