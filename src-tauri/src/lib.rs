@@ -2394,6 +2394,42 @@ fn reveal_path(state: tauri::State<'_, AppState>, path: String) -> Result<(), St
         })
 }
 
+// シェルを経由せずopenに渡せるHTTP(S) URLを検証する。
+fn validate_external_url(raw: &str) -> Result<String, String> {
+    let invalid = || "HTTPまたはHTTPSの有効なURLを指定してください。".to_string();
+    if raw.chars().any(char::is_control) {
+        return Err(invalid());
+    }
+    let trimmed = raw.trim();
+    let (scheme, rest) = trimmed.split_once("://").ok_or_else(invalid)?;
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        || rest.is_empty()
+        || rest.starts_with(['/', '\\', '?', '#'])
+        || trimmed.starts_with('-')
+    {
+        return Err(invalid());
+    }
+    let parsed = Url::parse(trimmed).map_err(|_| invalid())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none_or(str::is_empty) {
+        return Err(invalid());
+    }
+    Ok(trimmed.to_string())
+}
+
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let validated = validate_external_url(&url)?;
+    let status = Command::new("open")
+        .arg(validated)
+        .status()
+        .map_err(|error| format!("サイトを開けませんでした: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("サイトを開けませんでした。".to_string())
+    }
+}
+
 #[tauri::command]
 fn select_output_folder(app: AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -2455,6 +2491,7 @@ pub fn run() {
             read_capture,
             read_capture_thumbnail,
             open_path,
+            open_url,
             reveal_path,
             select_output_folder,
             select_scan_folder,
@@ -2468,6 +2505,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_urls_allow_only_http_with_a_host() {
+        for raw in ["https://example.com/path?q=1", " HTTP://example.com/path ", "https://例え.jp/"] {
+            let validated = validate_external_url(raw).unwrap();
+            assert!(!validated.starts_with('-'));
+            let parsed = Url::parse(&validated).unwrap();
+            assert!(matches!(parsed.scheme(), "http" | "https"));
+            assert!(parsed.host_str().is_some());
+        }
+        for raw in ["", "https://", "https:///path", "http:/example.com", "file:///tmp/test", "javascript:alert(1)", "-https://example.com", "https://exa\nmple.com", "\thttps://example.com", "https://example.com/\u{7f}"] {
+            assert!(validate_external_url(raw).unwrap_err().contains("URL"), "{raw:?}");
+        }
+    }
+
 
     #[test]
     fn child_exit_code_keeps_running_separate_from_success_and_failure() {
