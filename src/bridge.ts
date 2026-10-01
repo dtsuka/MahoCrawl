@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { externalUrl } from './urls'
 import type { CaptureImage, CaptureItem, CrawlConfiguration, CrawlStatus, ScanRunSummary, SeoPageItem, StartResponse } from './types'
 
 export const isTauri = Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
@@ -93,4 +94,14 @@ export async function subscribeOutput(handler: (text: string) => void): Promise<
 export async function subscribeCaptures(handler: (captures: CaptureItem[]) => void): Promise<UnlistenFn | null> {
   if (!isTauri) return null
   return listen<CaptureItem[]>('crawl://captures', (event) => handler(event.payload))
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  const validated = externalUrl(url)
+  if (!validated) throw new Error('HTTPまたはHTTPSの有効なURLを指定してください。')
+  if (isTauri) {
+    await invoke('open_url', { url: validated })
+  } else {
+    window.open(validated, '_blank', 'noopener,noreferrer')
+  }
 }
