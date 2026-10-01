@@ -141,7 +141,7 @@ Tauri externalBin uses the following target names:
 
 By default, the build targets Apple Silicon and Intel on macOS, and x86_64 on Windows (Git Bash). You can change this with the `SITEONE_TARGETS` environment variable (space-separated).
 
-On Windows, stopping a crawl ends SiteOne Crawler and its child processes (such as Chrome) together with `taskkill /T /F`. On macOS, SIGINT is sent to the process group, followed by SIGKILL if it does not exit.
+On macOS, stopping a crawl sends SIGINT to the process group, followed by SIGKILL if it does not exit within 1.5 seconds. A Windows GUI app cannot send a graceful interrupt equivalent to SIGINT, so if SiteOne Crawler is still running 1.5 seconds after the stop request, `taskkill /T /F` forcefully ends it together with its child processes (such as Chrome).
 
 After updating, run `siteone-crawler-* --version`, `cargo test`, `npm run build`, and `cargo check`. MahoCrawl never passes custom flags that do not exist in the SiteOne CLI. Because the current v2.5.1 has no CLI flag dedicated to cookie banners, the setting value is saved, but the UI marks it as "currently unsupported" (「現在未対応」) and disables the control.
 
