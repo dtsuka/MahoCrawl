@@ -144,12 +144,19 @@ export function sanitizeConfigurationForStorage(configuration: CrawlConfiguratio
 }
 
 export function safeSizeSlug(viewport: CaptureViewport): string {
-  let value = viewport.label
-    .trim()
-    .toLocaleLowerCase('en-US')
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^[.-]+|[.-]+$/g, '')
+  let result = ''
+  let previousDash = false
+  for (const character of viewport.label) {
+    const lower = character.replace(/[A-Z]/g, (ascii) => ascii.toLowerCase())
+    if (/^[a-z0-9._-]$/.test(lower)) {
+      result += lower
+      previousDash = false
+    } else if (!previousDash) {
+      result += '-'
+      previousDash = true
+    }
+  }
+  let value = result.replace(/^[.-]+|[.-]+$/g, '')
   if (!value) value = 'size'
   return `${value.slice(0, 80)}-${viewport.width}x${viewport.height}`
 }
@@ -186,7 +193,7 @@ function isIntegerInRange(value: unknown, minimum: number, maximum: number): val
 function containsDisallowedAuthChar(value: string): boolean {
   return [...value].some((character) => {
     const code = character.charCodeAt(0)
-    return code <= 0x1f || code === 0x7f
+    return code <= 0x1f || (code >= 0x7f && code <= 0x9f)
   })
 }
 
@@ -221,7 +228,7 @@ export function validateConfiguration(configuration: CrawlConfiguration): string
   const dimensions = new Set<string>()
   for (const viewport of configuration.captures) {
     if (!viewport.label.trim() || viewport.label.trim().length > 80) errors.push('キャプチャサイズ名は1〜80文字で指定してください。')
-    if (!viewport.id.trim()) errors.push('キャプチャサイズIDが不正です。')
+    if (!viewport.id.trim() || new TextEncoder().encode(viewport.id).length > 80) errors.push('キャプチャサイズIDが不正です。')
     if (ids.has(viewport.id.trim())) errors.push('キャプチャサイズIDが重複しています。')
     ids.add(viewport.id.trim())
     if (!isIntegerInRange(viewport.width, 320, 8192) || !isIntegerInRange(viewport.height, 320, 8192)) errors.push('画面サイズは幅・高さとも320〜8192pxで指定してください。')
