@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import type { CaptureImage, CaptureItem, CrawlConfiguration, CrawlStatus, SeoPageItem, StartResponse } from './types'
+import type { CaptureImage, CaptureItem, CrawlConfiguration, CrawlStatus, ScanRunSummary, SeoPageItem, StartResponse } from './types'
 
 export const isTauri = Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__)
 
@@ -44,6 +44,14 @@ export async function listSeoPages(root: string): Promise<SeoPageItem[]> {
   return invoke<SeoPageItem[]>('list_seo_pages', { root })
 }
 
+export async function listScanRuns(root: string): Promise<ScanRunSummary[]> {
+  return invoke<ScanRunSummary[]>('list_scan_runs', { root })
+}
+
+export async function loadScanRun(path: string): Promise<CrawlStatus> {
+  return invoke<CrawlStatus>('load_scan_run', { path })
+}
+
 export async function openPath(path: string): Promise<void> {
   await invoke('open_path', { path })
 }
@@ -62,6 +70,10 @@ export async function readCaptureThumbnail(path: string): Promise<CaptureImage> 
 
 export async function selectOutputFolder(): Promise<string | null> {
   return invoke<string | null>('select_output_folder')
+}
+
+export async function selectScanFolder(): Promise<string | null> {
+  return invoke<string | null>('select_scan_folder')
 }
 
 export async function clearLog(): Promise<void> {
