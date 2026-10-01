@@ -7,9 +7,11 @@ use std::process::Command;
 
 /// 環境変数の値からホームディレクトリを決める。Windows では HOME が無く USERPROFILE を使う。
 pub(crate) fn home_dir_from(
+    os: &str,
     home: Option<OsString>,
     user_profile: Option<OsString>,
 ) -> Option<PathBuf> {
+    let _ = os;
     [home, user_profile]
         .into_iter()
         .flatten()
@@ -19,8 +21,12 @@ pub(crate) fn home_dir_from(
 
 /// 現在のユーザーのホームディレクトリ。取得できない場合は一時ディレクトリを返す。
 pub(crate) fn home_dir() -> PathBuf {
-    home_dir_from(std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
-        .unwrap_or_else(std::env::temp_dir)
+    home_dir_from(
+        std::env::consts::OS,
+        std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
+    )
+    .unwrap_or_else(std::env::temp_dir)
 }
 
 /// Tauri externalBin の命名規則に従った sidecar のファイル名を OS / CPU から決める。
@@ -144,20 +150,29 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn home_dir_prefers_home_and_falls_back_to_user_profile() {
+    fn home_dir_prefers_home_on_macos_and_user_profile_on_windows() {
+        let home = || Some(OsString::from("/c/Users/maho"));
+        let profile = || Some(OsString::from("C:\\Users\\maho"));
+        // macOS では HOME を優先する
         assert_eq!(
-            home_dir_from(Some("/Users/maho".into()), Some("C:\\Users\\maho".into())),
-            Some(PathBuf::from("/Users/maho"))
+            home_dir_from("macos", home(), profile()),
+            Some(PathBuf::from("/c/Users/maho"))
         );
+        // Windows では Git Bash などが設定した HOME より USERPROFILE を優先する
         assert_eq!(
-            home_dir_from(None, Some("C:\\Users\\maho".into())),
+            home_dir_from("windows", home(), profile()),
+            Some(PathBuf::from("C:\\Users\\maho"))
+        );
+        // 優先する値が無い・空の場合はもう一方を使う
+        assert_eq!(
+            home_dir_from("macos", None, profile()),
             Some(PathBuf::from("C:\\Users\\maho"))
         );
         assert_eq!(
-            home_dir_from(Some("".into()), Some("C:\\Users\\maho".into())),
-            Some(PathBuf::from("C:\\Users\\maho"))
+            home_dir_from("windows", home(), Some("".into())),
+            Some(PathBuf::from("/c/Users/maho"))
         );
-        assert_eq!(home_dir_from(None, None), None);
+        assert_eq!(home_dir_from("windows", None, None), None);
     }
 
     #[test]
