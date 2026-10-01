@@ -37,8 +37,8 @@ export async function stopCrawl(): Promise<void> {
   await invoke('stop_crawl')
 }
 
-export async function listCaptures(root: string, configuration: CrawlConfiguration): Promise<CaptureItem[]> {
-  return invoke<CaptureItem[]>('list_captures', { root, configuration })
+export async function listCaptures(root: string): Promise<CaptureItem[]> {
+  return invoke<CaptureItem[]>('list_captures', { root })
 }
 
 export async function listSeoPages(root: string): Promise<SeoPageItem[]> {
