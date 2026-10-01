@@ -1,5 +1,7 @@
 # MahoCrawl 開発・ビルドガイド
 
+日本語 | [English](DEVELOPMENT.en.md)
+
 ソースコードから MahoCrawl をビルド・開発するための手順です。アプリを利用するだけなら [README](../README.md) の手順でビルド済みアプリをダウンロードしてください。
 
 ## 構成
