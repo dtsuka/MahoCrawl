@@ -772,7 +772,7 @@ describe('settings sidebar', () => {
     expect(bridgeMock.listCaptures).toHaveBeenCalledWith(runPath)
     expect(bridgeMock.listSeoPages).toHaveBeenCalledWith(runPath)
     expect(wrapper.find('.history-modal').exists()).toBe(false)
-    expect(wrapper.text()).toContain('過去のスキャンを開きました')
+    expect(wrapper.find('.message.info').exists()).toBe(false)
     expect(wrapper.text()).toContain(runPath)
     wrapper.unmount()
   })
