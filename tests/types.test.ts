@@ -109,3 +109,39 @@ describe('gallery helpers', () => {
     expect(filterAndSortCaptures(items, 'all', 'newest').map((item) => item.filename)).toEqual(['a.png', 'b.png', 'z.png'])
   })
 })
+
+
+describe('Rust configuration parity', () => {
+  it('limits capture ids to 80 UTF-8 bytes including surrounding whitespace', () => {
+    const configuration = cloneConfiguration(DEFAULT_CONFIGURATION)
+    for (const id of ['a'.repeat(81), 'あ'.repeat(27), ' ' + 'a'.repeat(80)]) {
+      configuration.captures[0].id = id
+      expect(validateConfiguration(configuration)).toContain('キャプチャサイズIDが不正です。')
+    }
+    for (const id of ['a'.repeat(80), 'あ'.repeat(26)]) {
+      configuration.captures[0].id = id
+      expect(validateConfiguration(configuration)).toEqual([])
+    }
+  })
+
+  it('rejects every C1 control character in either Basic auth field', () => {
+    for (let code = 0x80; code <= 0x9f; code += 1) {
+      for (const field of ['httpAuthUser', 'httpAuthPassword'] as const) {
+        const configuration = cloneConfiguration(DEFAULT_CONFIGURATION)
+        configuration.httpAuthUser = 'user'
+        configuration.httpAuthPassword = 'password'
+        configuration[field] += String.fromCharCode(code)
+        expect(validateConfiguration(configuration)).toContain('Basic認証に使用できない文字が含まれています。')
+      }
+    }
+  })
+
+  it.each([
+    ['K', 'size'], ['İ', 'size'], ['AKİB', 'a-b'],
+    ['A--B', 'a--b'], ['A- / B', 'a--b'], ['A💻💻B', 'a-b'],
+    [' .ABC_-. ', 'abc_'], ['A'.repeat(81), 'a'.repeat(80)],
+  ])('sanitizes %s using ASCII lowercase and Rust dash rules', (label, expected) => {
+    expect(safeSizeSlug({ id: 'test', label, width: 390, height: 844, enabled: true }))
+      .toBe(`${expected}-390x844`)
+  })
+})
