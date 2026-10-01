@@ -2524,6 +2524,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shutdown_reaps_child_even_when_runtime_is_poisoned() {
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "trap '' INT; while :; do sleep 1; done"]);
+        unsafe { command.pre_exec(|| { if libc::setpgid(0, 0) == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) } }); }
+        let child = command.spawn().unwrap();
+        let pid = child.id();
+        state.lock().unwrap().child = Some(child);
+        let other = Arc::clone(&state);
+        let _ = thread::spawn(move || { let _guard = other.lock().unwrap(); panic!("poison"); }).join();
+        shutdown_runtime(&state);
+        let guard = state.lock().unwrap_err().into_inner();
+        assert!(guard.cancel_requested);
+        assert!(guard.child.is_none());
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+    }
+
+    #[test]
+    fn failed_stdin_write_reaps_child_and_preserves_stderr() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec 0<&-; echo rejected >&2; sleep 10"])
+            .stdin(Stdio::piped()).stderr(Stdio::piped());
+        unsafe { command.pre_exec(|| { if libc::setpgid(0, 0) == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) } }); }
+        let mut child = command.spawn().unwrap();
+        let error = write_child_stdin(&mut child, &"x".repeat(1024 * 1024)).unwrap_err();
+        assert!(error.to_string().contains("rejected"));
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn desktop_command_contract_uses_background_dispatch_and_minimal_permissions() {
+        let source = include_str!("lib.rs");
+        for name in ["read_capture", "read_capture_thumbnail", "list_seo_pages", "list_scan_runs", "load_scan_run", "list_captures", "get_engine_version"] {
+            assert!(source.contains(&format!("#[tauri::command(async)]\nfn {name}(")), "{name} must dispatch off the UI thread");
+        }
+        let capabilities: serde_json::Value = serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert!(!capabilities["permissions"].as_array().unwrap().iter().any(|value| value == "dialog:allow-open"));
+        assert!(!source.contains(&["fn app_", "metadata("].concat()));
+    }
+
+    #[test]
     fn relative_non_page_screenshots_are_removed_and_outside_files_preserved() {
         let root = std::env::temp_dir().join(format!("maho-relative-{}", std::process::id()));
         let shots = root.join("screenshots");
