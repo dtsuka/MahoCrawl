@@ -80,7 +80,8 @@ for target in "${targets[@]}"; do
   fi
 
   printf 'ビルド中: %s\n' "$target"
-  cargo build --manifest-path "$siteone_dir/Cargo.toml" --release "${lock_args[@]}" "${build_target[@]/#/--target }"
+  # 配布バイナリにローカルの絶対パスを残さない
+  bash "$project_root/scripts/with-remapped-paths.sh" cargo build --manifest-path "$siteone_dir/Cargo.toml" --release "${lock_args[@]}" "${build_target[@]/#/--target }"
 
   if ((${#build_target[@]})); then
     output="$siteone_dir/target/$target/release/siteone-crawler"
