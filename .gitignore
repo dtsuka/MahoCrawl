@@ -13,6 +13,11 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/.tauri/
 
+# SiteOne Crawler のビルド成果物（npm run build:siteone で生成。配布は GitHub Releases の .app に同梱）
+src-tauri/binaries/
+Resources/Binaries/checksums.sha256
+Resources/Binaries/BUILD_METADATA.json
+
 # 環境変数・署名鍵・証明書（公開リポジトリに載せない）
 .env
 .env.*
