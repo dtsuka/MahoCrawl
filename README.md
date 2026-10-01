@@ -1,5 +1,7 @@
 # MahoCrawl
 
+日本語 | [English](README.en.md)
+
 MahoCrawl は、Web サイトをクロールしてページごとのスクリーンショットと SEO 情報をまとめて取得できる macOS アプリです。Desktop・Tablet・Mobile など複数の画面サイズを1回の実行で順番に撮影し、結果をギャラリーで確認できます。
 
 クロールと撮影には [SiteOne Crawler](https://github.com/janreges/siteone-crawler) を使用しています（アプリに同梱済みのため、別途インストールは不要です）。
