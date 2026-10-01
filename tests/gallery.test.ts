@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { searchCaptures, searchSeoPages, sortSeoPages } from '../src/gallery'
+import { pageSizeOptions, searchCaptures, searchSeoPages, sortSeoPages } from '../src/gallery'
 import type { CaptureItem, SeoPageItem } from '../src/types'
 
 function capture(overrides: Partial<CaptureItem> = {}): CaptureItem {
@@ -95,5 +95,31 @@ describe('gallery search and sort helpers', () => {
     expect(sortSeoPages(pages, 'newest')).toEqual([newest, titled, missingTitle])
     expect(sortSeoPages(pages, 'url')).toEqual([newest, titled, missingTitle])
     expect(pages).toEqual(original)
+  })
+})
+
+
+describe('page size options', () => {
+  it('uses mapped labels, configured labels, aligned report labels, then ids in order', () => {
+    const item = page({
+      sizeIds: ['mapped', 'configured', 'reported', 'unknown'],
+      sizeLabels: ['ignored', 'ignored', ' Report ', ' '],
+      captureBySize: { mapped: capture({ sizeLabel: ' Mapped ' }) },
+    })
+    const sizes = [{ id: 'configured', label: ' Configured ', width: 390, height: 844, enabled: true }]
+    expect(pageSizeOptions(item, sizes)).toEqual([
+      { id: 'mapped', label: 'Mapped' },
+      { id: 'configured', label: 'Configured' },
+      { id: 'reported', label: 'Report' },
+      { id: 'unknown', label: 'unknown' },
+    ])
+  })
+
+  it('does not guess labels from misaligned arrays or alter the inputs', () => {
+    const item = page({ sizeIds: ['first', 'second'], sizeLabels: ['wrong'], captureBySize: undefined })
+    const original = structuredClone(item)
+    expect(pageSizeOptions(item, [])).toEqual([{ id: 'first', label: 'first' }, { id: 'second', label: 'second' }])
+    expect(item).toEqual(original)
+    expect(pageSizeOptions(page({ sizeIds: [] }), [])).toEqual([])
   })
 })
