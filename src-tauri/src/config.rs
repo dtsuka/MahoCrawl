@@ -466,9 +466,9 @@ pub(crate) fn default_timeout() -> u32 {
 }
 
 pub(crate) fn default_output_root() -> String {
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Pictures/MahoCrawl"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/MahoCrawl"))
+    crate::platform::home_dir()
+        .join("Pictures")
+        .join("MahoCrawl")
         .to_string_lossy()
         .to_string()
 }
@@ -878,7 +878,9 @@ mod tests {
 
     #[test]
     fn default_output_root_is_pictures_folder_in_home() {
-        let expected = crate::platform::home_dir().join("Pictures").join("MahoCrawl");
+        let expected = crate::platform::home_dir()
+            .join("Pictures")
+            .join("MahoCrawl");
         assert_eq!(PathBuf::from(default_output_root()), expected);
     }
 }
