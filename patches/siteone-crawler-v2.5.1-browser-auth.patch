@@ -2341,3 +2341,108 @@ index 1aec2ac..d3e92b4 100644
              accept_invalid_certs: false,
              timezone: None,
              show_version_only: false,
+diff --git a/src/browser/screenshot.rs b/src/browser/screenshot.rs
+index 4cc6281..c5cb906 100644
+--- a/src/browser/screenshot.rs
++++ b/src/browser/screenshot.rs
+@@ -17,6 +17,39 @@ use crate::options::core_options::CoreOptions;
+ /// are silently truncated by the browser, so we cap + warn instead.
+ const MAX_FULLPAGE_HEIGHT: f64 = 16384.0;
+
++/// Scroll through the document before capture so intersection/scroll-triggered animations and
++/// lazy-loaded content have a chance to settle. The time/step caps keep infinite-scroll pages
++/// from holding a browser worker forever.
++const PRE_CAPTURE_SCROLL_SCRIPT: &str = r#"
++(async () => {
++    const scrollingElement = document.scrollingElement || document.documentElement;
++    const previousScrollBehavior = document.documentElement.style.scrollBehavior;
++    document.documentElement.style.scrollBehavior = "auto";
++    const step = Math.max(1, Math.floor(window.innerHeight * 0.8));
++    const deadline = Date.now() + 10000;
++    let steps = 0;
++
++    while (steps < 200 && Date.now() < deadline) {
++        const bottom = Math.max(0, scrollingElement.scrollHeight - window.innerHeight);
++        if (window.scrollY >= bottom) {
++            break;
++        }
++
++        window.scrollTo(0, Math.min(window.scrollY + step, bottom));
++        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
++        await new Promise((resolve) => setTimeout(resolve, 50));
++        steps += 1;
++    }
++
++    window.scrollTo(0, Math.max(0, scrollingElement.scrollHeight - window.innerHeight));
++    await new Promise((resolve) => setTimeout(resolve, 500));
++    window.scrollTo(0, 0);
++    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
++    document.documentElement.style.scrollBehavior = previousScrollBehavior;
++    await new Promise((resolve) => setTimeout(resolve, 1200));
++})()
++"#;
++
+ /// Capture a screenshot of `page` and write it to disk. Returns the saved file path.
+ pub async fn capture(page: &Page, options: &CoreOptions, url: &str) -> Result<String, String> {
+     let dir = screenshots_dir(options);
+@@ -32,33 +65,34 @@ pub async fn capture(page: &Page, options: &CoreOptions, url: &str) -> Result<St
+     let mut builder = ScreenshotParams::builder().format(format.clone());
+
+     if full_page {
+-        // Cap full-page height at the compositor limit instead of letting Chromium silently
+-        // truncate very tall pages.
+-        match page.execute(GetLayoutMetricsParams::default()).await {
+-            Ok(metrics) => {
+-                let size = &metrics.result.css_content_size;
+-                if size.height > MAX_FULLPAGE_HEIGHT {
+-                    eprintln!(
+-                        "⚠️  Full-page screenshot for {} capped at {}px (page is {}px tall; browser limit ~16384px).",
+-                        url, MAX_FULLPAGE_HEIGHT as i64, size.height as i64
+-                    );
+-                    builder = builder
+-                        .clip(PageViewport {
+-                            x: 0.0,
+-                            y: 0.0,
+-                            width: size.width,
+-                            height: MAX_FULLPAGE_HEIGHT,
+-                            scale: 1.0,
+-                        })
+-                        .capture_beyond_viewport(true);
+-                } else {
+-                    builder = builder.full_page(true).capture_beyond_viewport(true);
+-                }
+-            }
+-            Err(_) => {
+-                builder = builder.full_page(true).capture_beyond_viewport(true);
+-            }
++        page.evaluate(PRE_CAPTURE_SCROLL_SCRIPT)
++            .await
++            .map_err(|e| format!("pre-capture scroll failed: {}", e))?;
++
++        // Use an explicit document clip instead of chromiumoxide's full_page mode. Its
++        // implementation temporarily resizes the viewport to the document height, which makes
++        // CSS such as `height: 100vh` expand to cover the entire screenshot.
++        let metrics = page
++            .execute(GetLayoutMetricsParams::default())
++            .await
++            .map_err(|e| format!("full-page layout metrics failed: {}", e))?;
++        let size = &metrics.result.css_content_size;
++        let capture_height = size.height.min(MAX_FULLPAGE_HEIGHT);
++        if size.height > capture_height {
++            eprintln!(
++                "⚠️  Full-page screenshot for {} capped at {}px (page is {}px tall; browser limit ~16384px).",
++                url, MAX_FULLPAGE_HEIGHT as i64, size.height as i64
++            );
+         }
++        builder = builder
++            .clip(PageViewport {
++                x: 0.0,
++                y: 0.0,
++                width: size.width,
++                height: capture_height,
++                scale: 1.0,
++            })
++            .capture_beyond_viewport(true);
+     }
+
+     // Quality only applies to lossy formats.
