@@ -292,7 +292,6 @@ const {
   currentRunSnapshot,
   refreshCaptures,
   refreshSeoPages,
-  infoMessage,
   isDisposed,
 })
 
