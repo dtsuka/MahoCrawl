@@ -536,6 +536,8 @@ pub(crate) fn run_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
 
     #[test]
     fn timezone_resolution_uses_system_result_or_utc() {
@@ -543,6 +545,7 @@ mod tests {
         assert_eq!(timezone_or_utc(Err(())), "UTC");
     }
     #[test]
+    #[cfg(unix)]
     fn shutdown_reaps_child_even_when_runtime_is_poisoned() {
         let state = Arc::new(Mutex::new(RuntimeState::default()));
         let mut command = Command::new("/bin/sh");
@@ -572,6 +575,7 @@ mod tests {
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
     }
     #[test]
+    #[cfg(unix)]
     fn failed_stdin_write_reaps_child_and_preserves_stderr() {
         let mut command = Command::new("/bin/sh");
         command
@@ -599,6 +603,7 @@ mod tests {
         assert_eq!(log, "x".repeat(MAX_LOG_LENGTH - 1));
     }
     #[test]
+    #[cfg(unix)]
     fn child_exit_code_keeps_running_separate_from_success_and_failure() {
         for expected in [0, 7] {
             // The pipe keeps the process running without depending on a sleep.
