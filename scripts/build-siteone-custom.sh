@@ -9,8 +9,11 @@ metadata_dir="$project_root/Resources/Binaries"
 
 SITEONE_REPO="${SITEONE_REPO:-https://github.com/janreges/siteone-crawler.git}"
 SITEONE_REF="${SITEONE_REF:-v2.5.1}"
+SITEONE_COMMIT="${SITEONE_COMMIT:-12b49168679dd67934d3743895a2fabb50088c02}"
+
 CHROMIUMOXIDE_REPO="${CHROMIUMOXIDE_REPO:-https://github.com/mattsse/chromiumoxide.git}"
 CHROMIUMOXIDE_REF="${CHROMIUMOXIDE_REF:-v0.9.1}"
+CHROMIUMOXIDE_COMMIT="${CHROMIUMOXIDE_COMMIT:-a7e2bb835b9643410f9e3dc044f0d947e96cbfa4}"
 
 targets=(
   "aarch64-apple-darwin"
@@ -21,11 +24,24 @@ clone_or_update() {
   local dir="$1"
   local repo="$2"
   local ref="$3"
+  local expected_sha="$4"
+  
   if [[ ! -d "$dir/.git" ]]; then
     git clone --depth 1 --branch "$ref" "$repo" "$dir"
   else
     git -C "$dir" fetch --depth 1 origin "$ref"
     git -C "$dir" checkout -f FETCH_HEAD
+  fi
+  
+  # Verify that the checked-out commit matches the expected SHA
+  local actual_sha
+  actual_sha="$(git -C "$dir" rev-parse HEAD)"
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    printf 'エラー: %s の HEAD が期待値と一致しません\n' "$dir" >&2
+    printf '期待SHA: %s\n' "$expected_sha" >&2
+    printf '実SHA: %s\n' "$actual_sha" >&2
+    printf 'リポジトリ: %s (ref: %s)\n' "$repo" "$ref" >&2
+    exit 1
   fi
 }
 
@@ -42,8 +58,8 @@ mkdir -p "$build_root" "$bin_dir" "$metadata_dir"
 chromiumoxide_dir="$build_root/chromiumoxide"
 siteone_dir="$build_root/siteone-crawler"
 
-clone_or_update "$chromiumoxide_dir" "$CHROMIUMOXIDE_REPO" "$CHROMIUMOXIDE_REF"
-clone_or_update "$siteone_dir" "$SITEONE_REPO" "$SITEONE_REF"
+clone_or_update "$chromiumoxide_dir" "$CHROMIUMOXIDE_REPO" "$CHROMIUMOXIDE_REF" "$CHROMIUMOXIDE_COMMIT"
+clone_or_update "$siteone_dir" "$SITEONE_REPO" "$SITEONE_REF" "$SITEONE_COMMIT"
 
 apply_patch "$chromiumoxide_dir" "$patch_dir/chromiumoxide-v0.9.1-scoped-auth.patch"
 apply_patch "$siteone_dir" "$patch_dir/siteone-crawler-v2.5.1-browser-auth.patch"
@@ -101,7 +117,9 @@ done
 cat >"$metadata_dir/BUILD_METADATA.json" <<EOF
 {
   "siteoneRef": "$SITEONE_REF",
+  "siteoneCommit": "$SITEONE_COMMIT",
   "chromiumoxideRef": "$CHROMIUMOXIDE_REF",
+  "chromiumoxideCommit": "$CHROMIUMOXIDE_COMMIT",
   "rustc": "$(rustc --version)",
   "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "customization": "MahoCrawl browser Basic auth and reliable full-page capture (pre-scroll + fixed viewport)"
