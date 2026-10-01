@@ -6,6 +6,10 @@ MahoCrawl is a macOS app that crawls a website and captures screenshots and SEO 
 
 Crawling and capturing are powered by [SiteOne Crawler](https://github.com/janreges/siteone-crawler). It is bundled with the app, so no separate installation is required.
 
+![Grid view: browse captured screenshots at a glance](docs/images/screenshot-grid.jpg)
+
+![Row view: review URL, captures, and SEO information for each page](docs/images/screenshot-list.jpg)
+
 > **Note:** The app's user interface is currently available in Japanese only. In this guide, on-screen labels are shown in Japanese followed by an English translation.
 
 ## Requirements
