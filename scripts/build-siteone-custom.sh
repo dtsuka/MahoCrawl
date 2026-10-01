@@ -98,7 +98,7 @@ cat >"$metadata_dir/BUILD_METADATA.json" <<EOF
   "chromiumoxideRef": "$CHROMIUMOXIDE_REF",
   "rustc": "$(rustc --version)",
   "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "customization": "MahoCrawl browser Basic auth (scoped CDP + --http-auth-stdin)"
+  "customization": "MahoCrawl browser Basic auth and reliable full-page capture (pre-scroll + fixed viewport)"
 }
 EOF
 
