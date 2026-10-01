@@ -849,6 +849,8 @@ fn locate_binary(app: &AppHandle) -> Result<PathBuf, CrawlError> {
             candidates.push(parent.join("siteone-crawler"));
         }
     }
+    // 開発時のみソースツリー内のバイナリを探す。リリースビルドにビルド環境の絶対パスを埋め込まない。
+    #[cfg(debug_assertions)]
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("binaries")
