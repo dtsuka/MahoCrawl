@@ -1,5 +1,6 @@
 <script setup lang="ts">
 const paths = {
+  globe: 'M14 8A6 6 0 1 1 2 8a6 6 0 0 1 12 0ZM2 8h12M8 2c-3 3-3 9 0 12M8 2c3 3 3 9 0 12',
   grid: 'M2 2h4.5v4.5H2zM9.5 2H14v4.5H9.5zM2 9.5h4.5V14H2zM9.5 9.5H14V14H9.5z',
   list: 'M2 3h1M6 3h8M2 8h1M6 8h8M2 13h1M6 13h8',
   close: 'm4 4 8 8M12 4l-8 8',
