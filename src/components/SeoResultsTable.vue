@@ -184,6 +184,26 @@ function headingValues(page: SeoPageItem): Array<{ label: string; value: string 
     { label: 'H2', value: page.h2 },
   ]
 }
+
+/** ページ詳細を種類ごとにまとめ、1項目1行で読めるようにする。 */
+function detailGroups(page: SeoPageItem): Array<{ id: string; label: string; entries: Array<{ label: string; value: string | null }> }> {
+  const metadata = metadataValues(page)
+  return [
+    {
+      id: 'basic',
+      label: '基本情報',
+      entries: [
+        { label: 'URL', value: page.url },
+        { label: 'Title', value: page.title },
+        { label: 'Description', value: page.description },
+        { label: 'Canonical', value: page.canonical },
+      ],
+    },
+    { id: 'ogp', label: 'OGP', entries: metadata.filter((entry) => entry.label.startsWith('og:')) },
+    { id: 'twitter', label: 'Twitter', entries: metadata.filter((entry) => entry.label.startsWith('twitter:')) },
+    { id: 'headings', label: '見出し', entries: headingValues(page) },
+  ]
+}
 </script>
 
 <template>
@@ -294,32 +314,17 @@ function headingValues(page: SeoPageItem): Array<{ label: string; value: string 
               <td colspan="7">
                 <section class="detail-panel" :aria-labelledby="`${detailId(index)}-heading`">
                   <h3 :id="`${detailId(index)}-heading`">ページ詳細</h3>
-                  <dl class="detail-grid">
-                    <div class="detail-entry detail-entry-wide">
-                      <dt>URL</dt>
-                      <dd :class="{ missing: !hasValue(page.url) }">{{ valueOrMissing(page.url) }}</dd>
-                    </div>
-                    <div class="detail-entry">
-                      <dt>Title</dt>
-                      <dd :class="{ missing: !hasValue(page.title) }">{{ valueOrMissing(page.title) }}</dd>
-                    </div>
-                    <div class="detail-entry detail-entry-wide">
-                      <dt>Description</dt>
-                      <dd :class="{ missing: !hasValue(page.description) }">{{ valueOrMissing(page.description) }}</dd>
-                    </div>
-                    <div class="detail-entry detail-entry-wide">
-                      <dt>Canonical</dt>
-                      <dd :class="{ missing: !hasValue(page.canonical) }">{{ valueOrMissing(page.canonical) }}</dd>
-                    </div>
-                    <div v-for="entry in metadataValues(page)" :key="entry.label" class="detail-entry">
-                      <dt>{{ entry.label }}</dt>
-                      <dd :class="{ missing: !hasValue(entry.value) }">{{ valueOrMissing(entry.value) }}</dd>
-                    </div>
-                    <div v-for="entry in headingValues(page)" :key="entry.label" class="detail-entry">
-                      <dt>{{ entry.label }}</dt>
-                      <dd :class="{ missing: !hasValue(entry.value) }">{{ valueOrMissing(entry.value) }}</dd>
-                    </div>
-                  </dl>
+                  <div class="detail-groups">
+                    <section v-for="group in detailGroups(page)" :key="group.id" class="detail-group">
+                      <h4 :id="`${detailId(index)}-${group.id}`">{{ group.label }}</h4>
+                      <dl class="detail-list" :aria-labelledby="`${detailId(index)}-${group.id}`">
+                        <div v-for="entry in group.entries" :key="entry.label" class="detail-entry" :class="{ 'is-missing': !hasValue(entry.value) }">
+                          <dt>{{ entry.label }}</dt>
+                          <dd :class="{ missing: !hasValue(entry.value) }">{{ valueOrMissing(entry.value) }}</dd>
+                        </div>
+                      </dl>
+                    </section>
+                  </div>
                 </section>
               </td>
             </tr>
@@ -627,31 +632,59 @@ function headingValues(page: SeoPageItem): Array<{ label: string; value: string 
   font-weight: 700;
 }
 
-.detail-grid {
+.detail-groups {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 18px;
+  gap: 12px;
+}
+
+.detail-group {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #dfe6ee;
+  border-radius: 7px;
+  background: #fff;
+}
+
+.detail-group h4 {
+  margin: 0;
+  padding: 7px 12px;
+  border-bottom: 1px solid #e3e9f0;
+  background: #f1f4f8;
+  color: #44566b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.detail-list {
   margin: 0;
 }
 
+/* 項目名と値を1行に並べ、行間を罫線で区切る */
 .detail-entry {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
   min-width: 0;
 }
 
-.detail-entry-wide {
-  grid-column: span 2;
+.detail-entry + .detail-entry {
+  border-top: 1px solid #edf1f5;
 }
 
 .detail-entry dt {
-  margin-bottom: 4px;
+  padding: 9px 12px;
+  border-right: 1px solid #edf1f5;
+  background: #fafbfd;
   color: #526273;
   font-size: 12px;
   font-weight: 700;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .detail-entry dd {
   min-width: 0;
   margin: 0;
+  padding: 9px 12px;
   color: #36495e;
   font-size: 13px;
   line-height: 1.5;
@@ -677,10 +710,10 @@ function headingValues(page: SeoPageItem): Array<{ label: string; value: string 
 }
 
 @container seo-table (max-width: 620px) {
-  .detail-grid { display: block; }
   .detail-panel { padding: 15px 14px 17px; }
-  .detail-entry { margin-top: 13px; }
-  .detail-entry:first-child { margin-top: 0; }
+  .detail-entry { grid-template-columns: minmax(0, 1fr); }
+  .detail-entry dt { padding-bottom: 0; border-right: 0; background: transparent; }
+  .detail-entry dd { padding-top: 3px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
