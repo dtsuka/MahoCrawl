@@ -960,10 +960,10 @@ fn trim_log_to_limit(log: &mut String) {
         return;
     }
     let remove = log.len() - MAX_LOG_LENGTH;
-    let boundary = log
-        .char_indices()
-        .find_map(|(index, _)| (index >= remove).then_some(index))
-        .unwrap_or(log.len());
+    let mut boundary = remove;
+    while !log.is_char_boundary(boundary) {
+        boundary += 1;
+    }
     log.drain(..boundary);
 }
 
@@ -1660,16 +1660,42 @@ fn normalize_heading_text(value: &str) -> String {
             _ => {}
         }
     }
-    output
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
+    let mut decoded = String::new();
+    let mut remaining = output.as_str();
+    while let Some(index) = remaining.find('&') {
+        decoded.push_str(&remaining[..index]);
+        remaining = &remaining[index..];
+        if let Some(end) = remaining.find(';') {
+            let entity = &remaining[1..end];
+            let character = match entity {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "nbsp" => Some(' '),
+                _ => entity
+                    .strip_prefix("#x")
+                    .or_else(|| entity.strip_prefix("#X"))
+                    .and_then(|value| u32::from_str_radix(value, 16).ok())
+                    .or_else(|| {
+                        entity
+                            .strip_prefix('#')
+                            .and_then(|value| value.parse().ok())
+                    })
+                    .and_then(char::from_u32),
+            };
+            if let Some(character) = character {
+                decoded.push(character);
+                remaining = &remaining[end + 1..];
+                continue;
+            }
+        }
+        decoded.push('&');
+        remaining = &remaining[1..];
+    }
+    decoded.push_str(remaining);
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn extract_heading(value: &str, level: u8) -> Option<String> {
@@ -1988,19 +2014,39 @@ fn load_configuration(app: AppHandle) -> Result<Option<CrawlConfiguration>, Stri
     read_configuration(&path).map_err(|error| error.to_string())
 }
 
+fn write_configuration(path: &Path, configuration: &CrawlConfiguration) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let data = serde_json::to_vec_pretty(&configuration.for_storage())
+        .map_err(|error| error.to_string())?;
+    let temporary = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let mut file = File::create(&temporary).map_err(|error| error.to_string())?;
+    let result = (|| {
+        file.write_all(&data)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.map_err(|error: std::io::Error| error.to_string())
+}
+
 #[tauri::command]
 fn save_configuration(app: AppHandle, configuration: CrawlConfiguration) -> Result<(), String> {
     configuration
         .validate()
         .map_err(|error| error.to_string())?;
     let path = config_path(&app).map_err(|error| error.to_string())?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let data = serde_json::to_vec_pretty(&configuration.for_storage())
-        .map_err(|error| error.to_string())?;
-    let mut file = File::create(path).map_err(|error| error.to_string())?;
-    file.write_all(&data).map_err(|error| error.to_string())
+    write_configuration(&path, &configuration)
 }
 
 #[tauri::command]
@@ -2510,7 +2556,10 @@ mod tests {
 
     #[test]
     fn heading_entities_are_decoded_once() {
-        assert_eq!(normalize_heading_text("&amp;lt; &lt; &#65; &#x1F600; &unknown;"), "&lt; < A 😀 &unknown;");
+        assert_eq!(
+            normalize_heading_text("&amp;lt; &lt; &#65; &#x1F600; &unknown;"),
+            "&lt; < A 😀 &unknown;"
+        );
     }
 
     #[test]
@@ -2537,18 +2586,35 @@ mod tests {
 
     #[test]
     fn external_urls_allow_only_http_with_a_host() {
-        for raw in ["https://example.com/path?q=1", " HTTP://example.com/path ", "https://例え.jp/"] {
+        for raw in [
+            "https://example.com/path?q=1",
+            " HTTP://example.com/path ",
+            "https://例え.jp/",
+        ] {
             let validated = validate_external_url(raw).unwrap();
             assert!(!validated.starts_with('-'));
             let parsed = Url::parse(&validated).unwrap();
             assert!(matches!(parsed.scheme(), "http" | "https"));
             assert!(parsed.host_str().is_some());
         }
-        for raw in ["", "https://", "https:///path", "http:/example.com", "file:///tmp/test", "javascript:alert(1)", "-https://example.com", "https://exa\nmple.com", "\thttps://example.com", "https://example.com/\u{7f}"] {
-            assert!(validate_external_url(raw).unwrap_err().contains("URL"), "{raw:?}");
+        for raw in [
+            "",
+            "https://",
+            "https:///path",
+            "http:/example.com",
+            "file:///tmp/test",
+            "javascript:alert(1)",
+            "-https://example.com",
+            "https://exa\nmple.com",
+            "\thttps://example.com",
+            "https://example.com/\u{7f}",
+        ] {
+            assert!(
+                validate_external_url(raw).unwrap_err().contains("URL"),
+                "{raw:?}"
+            );
         }
     }
-
 
     #[test]
     fn child_exit_code_keeps_running_separate_from_success_and_failure() {
@@ -2779,7 +2845,9 @@ mod tests {
             "UTC",
         )
         .unwrap();
-        assert!(!arguments.iter().any(|argument| argument == "--http-auth-stdin"));
+        assert!(!arguments
+            .iter()
+            .any(|argument| argument == "--http-auth-stdin"));
 
         configuration.http_auth_user = " staging ".into();
         configuration.http_auth_password = "p:ass word".into();
