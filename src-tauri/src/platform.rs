@@ -220,11 +220,10 @@ mod tests {
         }
         #[cfg(windows)]
         {
+            use std::os::windows::process::CommandExt;
+            // cmd は Rust が付ける引用符を正しく解釈できないため、文字列をそのまま渡す
             let mut command = Command::new("cmd");
-            command.args([
-                "/C",
-                "ping -n 30 127.0.0.1 >NUL & ping -n 30 127.0.0.1 >NUL",
-            ]);
+            command.raw_arg("/C echo ready& ping -n 30 127.0.0.1 >NUL & ping -n 30 127.0.0.1 >NUL");
             command
         }
     }
