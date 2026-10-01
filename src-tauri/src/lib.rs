@@ -2509,6 +2509,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn heading_entities_are_decoded_once() {
+        assert_eq!(normalize_heading_text("&amp;lt; &lt; &#65; &#x1F600; &unknown;"), "&lt; < A 😀 &unknown;");
+    }
+
+    #[test]
+    fn log_limit_preserves_utf8_tail() {
+        let mut log = format!("あ{}", "x".repeat(MAX_LOG_LENGTH - 1));
+        trim_log_to_limit(&mut log);
+        assert_eq!(log, "x".repeat(MAX_LOG_LENGTH - 1));
+    }
+
+    #[test]
+    fn configuration_save_replaces_without_following_destination_symlink() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("maho-atomic-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("original");
+        let path = root.join("configuration.json");
+        fs::write(&target, b"original").unwrap();
+        symlink(&target, &path).unwrap();
+        write_configuration(&path, &CrawlConfiguration::default()).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert!(read_configuration(&path).unwrap().is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn external_urls_allow_only_http_with_a_host() {
         for raw in ["https://example.com/path?q=1", " HTTP://example.com/path ", "https://例え.jp/"] {
             let validated = validate_external_url(raw).unwrap();
