@@ -1,0 +1,29 @@
+# cargo-about の設定。
+# 配布アプリに静的リンクされる Rust クレートのライセンス一覧を生成する。
+# ここにない SPDX ライセンスを持つクレートが追加された場合は生成が失敗するので、
+# 内容を確認してから accepted に追加すること。
+
+accepted = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
