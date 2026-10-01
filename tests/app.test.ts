@@ -103,6 +103,49 @@ describe('settings sidebar', () => {
   bridgeMock.validateConfigurationRust.mockReset()
 })
 
+  it('composes the settings, grid, preview and history components without changing their interactions', async () => {
+    const wrapper = await mountApp()
+    expect(wrapper.findComponent({ name: 'SettingsSidebar' }).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'CaptureGrid' }).exists()).toBe(true)
+    await wrapper.find('.capture-card').trigger('click')
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'PreviewModal' }).exists()).toBe(true)
+    expect(wrapper.find('.preview-modal').attributes('aria-modal')).toBe('true')
+    await wrapper.find('button[aria-label="プレビューを閉じる"]').trigger('click')
+    wrapper.unmount()
+
+    const native = await mountApp({ tauri: true })
+    await native.find('.run-actions button').trigger('click')
+    await flushPromises()
+    expect(native.findComponent({ name: 'HistoryModal' }).exists()).toBe(true)
+    expect(native.find('.history-modal').attributes('aria-labelledby')).toBe('history-title')
+    await native.find('button[aria-label="過去のスキャンを閉じる"]').trigger('click')
+    expect(native.find('.history-modal').exists()).toBe(false)
+    native.unmount()
+  })
+
+  it('buffers output while captures are visible and clears queued output on run reset', async () => {
+    const wrapper = await mountApp({ tauri: true })
+    const vm = wrapper.vm as unknown as {
+      applyStatus: (status: CrawlStatus) => boolean
+      appendOutputEvent: (text: string) => void
+      resetRunArtifacts: () => void
+      logText: string
+    }
+    vm.applyStatus({ ...idleStatus, phase: 'running', runId: 'log-run' })
+    vm.appendOutputEvent('first')
+    vm.appendOutputEvent('second')
+    expect(vm.logText).toBe('')
+    const logTab = wrapper.findAll('.tabs button')[1]
+    await logTab.trigger('click')
+    expect(wrapper.find('.log-workspace pre').text()).toBe('firstsecond')
+    vm.appendOutputEvent('discard')
+    vm.resetRunArtifacts()
+    await nextTick()
+    expect(vm.logText).toBe('')
+    wrapper.unmount()
+  })
+
   it('opens mapped URLs from grid, modal and rows, and reports failures', async () => {
     const wrapper = await mountApp()
     const button = wrapper.find('.capture-card button[aria-label="サイトを開く"]')
@@ -726,7 +769,7 @@ describe('settings sidebar', () => {
     await wrapper.find<HTMLButtonElement>('.history-list li > button').trigger('click')
     await flushPromises()
     expect(bridgeMock.loadScanRun).toHaveBeenCalledWith(runPath)
-    expect(bridgeMock.listCaptures).toHaveBeenCalledWith(runPath, expect.any(Object))
+    expect(bridgeMock.listCaptures).toHaveBeenCalledWith(runPath)
     expect(bridgeMock.listSeoPages).toHaveBeenCalledWith(runPath)
     expect(wrapper.find('.history-modal').exists()).toBe(false)
     expect(wrapper.text()).toContain('過去のスキャンを開きました')
