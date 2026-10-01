@@ -807,6 +807,7 @@ fn binary_name() -> &'static str {
 
 fn locate_binary(app: &AppHandle) -> Result<PathBuf, CrawlError> {
     let mut candidates = Vec::new();
+    #[cfg(debug_assertions)]
     if let Some(value) = std::env::var_os("SITEONE_CRAWLER_PATH") {
         candidates.push(PathBuf::from(value));
     }
@@ -829,7 +830,9 @@ fn locate_binary(app: &AppHandle) -> Result<PathBuf, CrawlError> {
             .join("binaries")
             .join(binary_name()),
     );
+    #[cfg(debug_assertions)]
     candidates.push(PathBuf::from("/opt/homebrew/bin/siteone-crawler"));
+    #[cfg(debug_assertions)]
     candidates.push(PathBuf::from("/usr/local/bin/siteone-crawler"));
     candidates
         .into_iter()
@@ -1004,6 +1007,49 @@ fn child_exit_code(child: &mut Child) -> Result<Option<i32>, CrawlError> {
         .map_err(|error| CrawlError::Io(error.to_string()))
 }
 
+fn terminate_child(child: &mut Child) {
+    signal_process_group(child.id(), libc::SIGINT);
+    let deadline = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Kill the entire group even if its leader already exited.
+    signal_process_group(child.id(), libc::SIGKILL);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn shutdown_runtime(state: &SharedState) {
+    let child = {
+        let mut guard = state.lock().unwrap_or_else(|error| error.into_inner());
+        guard.cancel_requested = true;
+        guard.child.take()
+    };
+    if let Some(mut child) = child {
+        terminate_child(&mut child);
+    }
+}
+
+fn write_child_stdin(child: &mut Child, payload: &str) -> Result<(), CrawlError> {
+    let result = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::new(ErrorKind::BrokenPipe, "stdin is unavailable"))
+        .and_then(|mut stdin| stdin.write_all(payload.as_bytes()));
+    if let Err(error) = result {
+        terminate_child(child);
+        let mut stderr = String::new();
+        if let Some(stream) = child.stderr.take() {
+            let _ = stream.take(MAX_REPORT_LENGTH).read_to_string(&mut stderr);
+        }
+        return Err(CrawlError::Io(format!("{error}: {stderr}")));
+    }
+    Ok(())
+}
+
 fn run_child(
     app: &AppHandle,
     state: &SharedState,
@@ -1038,17 +1084,21 @@ fn run_child(
         .spawn()
         .map_err(|error| CrawlError::Io(error.to_string()))?;
     if let Some(payload) = stdin_payload {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(payload.as_bytes())
-                .map_err(|error| CrawlError::Io(error.to_string()))?;
-        }
+        write_child_stdin(&mut child, payload)?;
     }
     let child_pid = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    if let Ok(mut guard) = state.lock() {
-        guard.child = Some(child);
+    match state.lock() {
+        Ok(mut guard) if !guard.cancel_requested => guard.child = Some(child),
+        Ok(_) => {
+            terminate_child(&mut child);
+            return Err(CrawlError::Io("クロールは終了中です。".into()));
+        }
+        Err(error) => {
+            terminate_child(&mut child);
+            return Err(CrawlError::Io(error.to_string()));
+        }
     }
 
     let (sender, receiver) = mpsc::channel::<String>();
@@ -1090,15 +1140,24 @@ fn run_child(
         while let Ok(text) = receiver.try_recv() {
             append_log(app, state, &text);
         }
-        let finished = {
-            let mut guard = state
-                .lock()
-                .map_err(|error| CrawlError::Io(error.to_string()))?;
-            let child = guard
-                .child
-                .as_mut()
-                .ok_or_else(|| CrawlError::Io("クロールプロセスが見つかりません。".into()))?;
-            child_exit_code(child)?
+        let finished = match state.lock() {
+            Ok(mut guard) => match guard.child.as_mut() {
+                Some(child) => child_exit_code(child),
+                None => return Err(CrawlError::Io("クロールプロセスが見つかりません。".into())),
+            },
+            Err(error) => {
+                let message = error.to_string();
+                drop(error);
+                shutdown_runtime(state);
+                return Err(CrawlError::Io(message));
+            }
+        };
+        let finished = match finished {
+            Ok(value) => value,
+            Err(error) => {
+                shutdown_runtime(state);
+                return Err(error);
+            }
         };
         if let Some(exit_code) = finished {
             // Reader threads may still be draining a final stderr chunk. Wait
@@ -1125,7 +1184,6 @@ fn run_queue(
     app: AppHandle,
     state: SharedState,
     configuration: CrawlConfiguration,
-    run_id: String,
     root: PathBuf,
     run_captures: Vec<CaptureViewport>,
     plans: Vec<OutputPlan>,
@@ -1310,7 +1368,6 @@ fn run_queue(
         append_log(&app, &state, "\nクロールが完了しました。\n");
     }
     emit_status(&app, &state);
-    let _ = run_id;
 }
 
 fn list_capture_items(
@@ -2041,20 +2098,24 @@ fn get_log(state: tauri::State<'_, AppState>) -> Result<String, String> {
         .map_err(|_| "ログを読み込めません".to_string())
 }
 
-#[tauri::command]
-fn get_engine_version(app: AppHandle) -> Result<String, String> {
-    let binary = locate_binary(&app).map_err(|error| error.to_string())?;
-    let output = Command::new(binary)
-        .arg("--version")
-        .output()
-        .map_err(|error| error.to_string())?;
-    let text = clean_ansi(&String::from_utf8_lossy(&output.stdout));
-    Ok(text
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("SiteOne Crawler 2.5.1")
-        .trim()
-        .to_string())
+#[tauri::command(async)]
+async fn get_engine_version(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let binary = locate_binary(&app).map_err(|error| error.to_string())?;
+        let output = Command::new(binary)
+            .arg("--version")
+            .output()
+            .map_err(|error| error.to_string())?;
+        let text = clean_ansi(&String::from_utf8_lossy(&output.stdout));
+        Ok(text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("SiteOne Crawler 2.5.1")
+            .trim()
+            .to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2128,7 +2189,6 @@ fn start_crawl(
     }
     let thread_state = Arc::clone(&state.runtime);
     let thread_app = app.clone();
-    let thread_run_id = run_id.clone();
     let response_root = root.to_string_lossy().to_string();
     let thread_captures = run_captures.clone();
     let thread_plans = plans.clone();
@@ -2137,7 +2197,6 @@ fn start_crawl(
             thread_app,
             thread_state,
             configuration,
-            thread_run_id,
             root,
             thread_captures,
             thread_plans,
@@ -2170,183 +2229,211 @@ fn stop_crawl(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), S
     Ok(())
 }
 
-#[tauri::command]
-fn list_captures(
+#[tauri::command(async)]
+async fn list_captures(
     state: tauri::State<'_, AppState>,
     root: String,
-    _configuration: CrawlConfiguration,
 ) -> Result<Vec<CaptureItem>, String> {
-    let root = expand_path(root.trim());
-    let (allowed, configured) = state
-        .runtime
-        .lock()
-        .map(|guard| {
-            (
-                guard.allowed_open_roots.clone(),
-                guard.status.run_captures.clone(),
-            )
-        })
-        .map_err(|_| "パスの許可情報を読み込めません。".to_string())?;
-    if !is_path_allowed(&root, &allowed) {
-        return Err("実行で生成した保存先以外は列挙できません。".to_string());
-    }
-    list_capture_items(&root, &configured).map_err(|error| error.to_string())
+    let state = Arc::clone(&state.runtime);
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = expand_path(root.trim());
+        let (allowed, configured) = state
+            .lock()
+            .map(|guard| {
+                (
+                    guard.allowed_open_roots.clone(),
+                    guard.status.run_captures.clone(),
+                )
+            })
+            .map_err(|_| "パスの許可情報を読み込めません。".to_string())?;
+        if !is_path_allowed(&root, &allowed) {
+            return Err("実行で生成した保存先以外は列挙できません。".to_string());
+        }
+        list_capture_items(&root, &configured).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
-#[tauri::command]
-fn list_seo_pages(
+#[tauri::command(async)]
+async fn list_seo_pages(
     state: tauri::State<'_, AppState>,
     root: String,
 ) -> Result<Vec<SeoPageItem>, String> {
-    let root = expand_path(root.trim());
-    let (allowed, configured) = state
-        .runtime
-        .lock()
-        .map(|guard| {
-            (
-                guard.allowed_open_roots.clone(),
-                guard.status.run_captures.clone(),
-            )
-        })
-        .map_err(|_| "パスの許可情報を読み込めません。".to_string())?;
-    if !is_path_allowed(&root, &allowed) {
-        return Err("実行で生成した保存先以外はSEOレポートを読み込めません。".to_string());
-    }
-    list_seo_page_items(&root, &configured, &allowed).map_err(|error| error.to_string())
+    let state = Arc::clone(&state.runtime);
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = expand_path(root.trim());
+        let (allowed, configured) = state
+            .lock()
+            .map(|guard| {
+                (
+                    guard.allowed_open_roots.clone(),
+                    guard.status.run_captures.clone(),
+                )
+            })
+            .map_err(|_| "パスの許可情報を読み込めません。".to_string())?;
+        if !is_path_allowed(&root, &allowed) {
+            return Err("実行で生成した保存先以外はSEOレポートを読み込めません。".to_string());
+        }
+        list_seo_page_items(&root, &configured, &allowed).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
-#[tauri::command]
-fn list_scan_runs(
+#[tauri::command(async)]
+async fn list_scan_runs(
     state: tauri::State<'_, AppState>,
     root: String,
 ) -> Result<Vec<ScanRunSummary>, String> {
-    let requested = expand_path(root.trim());
-    if !requested.exists() {
-        return Ok(Vec::new());
-    }
-    let root = fs::canonicalize(&requested).map_err(|error| error.to_string())?;
-    if !root.is_dir() {
-        return Err("スキャンの保存先フォルダを指定してください。".to_string());
-    }
-    {
-        let mut guard = state
-            .runtime
-            .lock()
-            .map_err(|_| "履歴フォルダの許可情報を更新できません。".to_string())?;
-        if !guard
-            .history_browse_roots
-            .iter()
-            .any(|known| known == &root)
-        {
-            guard.history_browse_roots.push(root.clone());
+    let state = Arc::clone(&state.runtime);
+    tauri::async_runtime::spawn_blocking(move || {
+        let requested = expand_path(root.trim());
+        if !requested.exists() {
+            return Ok(Vec::new());
         }
-    }
-
-    if let Some((summary, _)) = discover_scan_run(&root).map_err(|error| error.to_string())? {
-        return Ok(vec![summary]);
-    }
-
-    let mut runs = fs::read_dir(&root)
-        .map_err(|error| error.to_string())?
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .filter_map(|path| {
-            discover_scan_run(&path)
-                .ok()
-                .flatten()
-                .map(|(summary, _)| summary)
-        })
-        .collect::<Vec<_>>();
-    runs.sort_by(|left, right| {
-        right
-            .modified_at
-            .cmp(&left.modified_at)
-            .then_with(|| right.run_id.cmp(&left.run_id))
-    });
-    runs.truncate(500);
-    Ok(runs)
-}
-
-#[tauri::command]
-fn load_scan_run(state: tauri::State<'_, AppState>, path: String) -> Result<CrawlStatus, String> {
-    let path = expand_path(path.trim());
-    let browse_roots = state
-        .runtime
-        .lock()
-        .map(|guard| {
-            if guard.status.phase.is_active() || guard.start_in_progress {
-                return Err("クロール実行中は過去のスキャンを開けません。".to_string());
+        let root = fs::canonicalize(&requested).map_err(|error| error.to_string())?;
+        if !root.is_dir() {
+            return Err("スキャンの保存先フォルダを指定してください。".to_string());
+        }
+        {
+            let mut guard = state
+                .lock()
+                .map_err(|_| "履歴フォルダの許可情報を更新できません。".to_string())?;
+            if !guard
+                .history_browse_roots
+                .iter()
+                .any(|known| known == &root)
+            {
+                guard.history_browse_roots.push(root.clone());
             }
-            Ok(guard.history_browse_roots.clone())
-        })
-        .map_err(|_| "履歴フォルダの許可情報を読み込めません。".to_string())??;
-    if !is_path_allowed(&path, &browse_roots) {
-        return Err("一覧に表示されたスキャン以外は開けません。".to_string());
-    }
-    let root = fs::canonicalize(&path).map_err(|error| error.to_string())?;
-    let (_, status) = discover_scan_run(&root)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "MahoCrawlのスキャン結果が見つかりません。".to_string())?;
-    let mut guard = state
-        .runtime
-        .lock()
-        .map_err(|_| "過去のスキャンを読み込めません。".to_string())?;
-    if guard.status.phase.is_active() || guard.start_in_progress {
-        return Err("クロール実行中は過去のスキャンを開けません。".to_string());
-    }
-    guard.status = status.clone();
-    guard.log.clear();
-    if !guard.allowed_open_roots.iter().any(|known| known == &root) {
-        guard.allowed_open_roots.push(root);
-    }
-    Ok(status)
-}
+        }
 
-#[tauri::command]
-fn read_capture(state: tauri::State<'_, AppState>, path: String) -> Result<CaptureImage, String> {
-    let path = expand_path(path.trim());
-    let allowed = state
-        .runtime
-        .lock()
-        .map_err(|_| "パスの許可情報を読み込めません。".to_string())?
-        .allowed_open_roots
-        .clone();
-    if !is_path_allowed(&path, &allowed) {
-        return Err("実行で生成した保存先以外は読み込めません。".to_string());
-    }
-    let mime_type =
-        image_mime_type(&path).ok_or_else(|| "対応していない画像形式です。".to_string())?;
-    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
-    if metadata.len() > 24 * 1024 * 1024 {
-        return Err("画像が大きすぎるためプレビューできません。".to_string());
-    }
-    let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-    Ok(CaptureImage {
-        mime_type: mime_type.to_string(),
-        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        if let Some((summary, _)) = discover_scan_run(&root).map_err(|error| error.to_string())? {
+            return Ok(vec![summary]);
+        }
+
+        let mut runs = fs::read_dir(&root)
+            .map_err(|error| error.to_string())?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .filter_map(|path| {
+                discover_scan_run(&path)
+                    .ok()
+                    .flatten()
+                    .map(|(summary, _)| summary)
+            })
+            .collect::<Vec<_>>();
+        runs.sort_by(|left, right| {
+            right
+                .modified_at
+                .cmp(&left.modified_at)
+                .then_with(|| right.run_id.cmp(&left.run_id))
+        });
+        runs.truncate(500);
+        Ok(runs)
     })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
-#[tauri::command]
-fn read_capture_thumbnail(
+#[tauri::command(async)]
+async fn load_scan_run(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<CrawlStatus, String> {
+    let state = Arc::clone(&state.runtime);
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = expand_path(path.trim());
+        let browse_roots = state
+            .lock()
+            .map(|guard| {
+                if guard.status.phase.is_active() || guard.start_in_progress {
+                    return Err("クロール実行中は過去のスキャンを開けません。".to_string());
+                }
+                Ok(guard.history_browse_roots.clone())
+            })
+            .map_err(|_| "履歴フォルダの許可情報を読み込めません。".to_string())??;
+        if !is_path_allowed(&path, &browse_roots) {
+            return Err("一覧に表示されたスキャン以外は開けません。".to_string());
+        }
+        let root = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+        let (_, status) = discover_scan_run(&root)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "MahoCrawlのスキャン結果が見つかりません。".to_string())?;
+        let mut guard = state
+            .lock()
+            .map_err(|_| "過去のスキャンを読み込めません。".to_string())?;
+        if guard.status.phase.is_active() || guard.start_in_progress {
+            return Err("クロール実行中は過去のスキャンを開けません。".to_string());
+        }
+        guard.status = status.clone();
+        guard.log.clear();
+        if !guard.allowed_open_roots.iter().any(|known| known == &root) {
+            guard.allowed_open_roots.push(root);
+        }
+        Ok(status)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(async)]
+async fn read_capture(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<CaptureImage, String> {
-    let path = expand_path(path.trim());
-    let allowed = state
-        .runtime
-        .lock()
-        .map_err(|_| "パスの許可情報を読み込めません。".to_string())?
-        .allowed_open_roots
-        .clone();
-    if !is_path_allowed(&path, &allowed) {
-        return Err("実行で生成した保存先以外は読み込めません。".to_string());
-    }
-    if image_mime_type(&path).is_none() {
-        return Err("対応していない画像形式です。".to_string());
-    }
-    encode_thumbnail(&path)
+    let state = Arc::clone(&state.runtime);
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = expand_path(path.trim());
+        let allowed = state
+            .lock()
+            .map_err(|_| "パスの許可情報を読み込めません。".to_string())?
+            .allowed_open_roots
+            .clone();
+        if !is_path_allowed(&path, &allowed) {
+            return Err("実行で生成した保存先以外は読み込めません。".to_string());
+        }
+        let mime_type =
+            image_mime_type(&path).ok_or_else(|| "対応していない画像形式です。".to_string())?;
+        let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+        if metadata.len() > 24 * 1024 * 1024 {
+            return Err("画像が大きすぎるためプレビューできません。".to_string());
+        }
+        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+        Ok(CaptureImage {
+            mime_type: mime_type.to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(async)]
+async fn read_capture_thumbnail(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<CaptureImage, String> {
+    let state = Arc::clone(&state.runtime);
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = expand_path(path.trim());
+        let allowed = state
+            .lock()
+            .map_err(|_| "パスの許可情報を読み込めません。".to_string())?
+            .allowed_open_roots
+            .clone();
+        if !is_path_allowed(&path, &allowed) {
+            return Err("実行で生成した保存先以外は読み込めません。".to_string());
+        }
+        if image_mime_type(&path).is_none() {
+            return Err("対応していない画像形式です。".to_string());
+        }
+        encode_thumbnail(&path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2482,16 +2569,13 @@ fn clear_log(state: tauri::State<'_, AppState>) -> Result<(), String> {
         .map_err(|_| "ログを消去できません".to_string())
 }
 
-#[tauri::command]
-fn app_metadata() -> serde_json::Value {
-    serde_json::json!({ "name": "MahoCrawl", "version": "0.1.0", "siteOneVersion": "2.5.1" })
-}
-
 pub fn run() {
     let runtime = Arc::new(Mutex::new(RuntimeState::default()));
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState { runtime })
+        .manage(AppState {
+            runtime: Arc::clone(&runtime),
+        })
         .invoke_handler(tauri::generate_handler![
             load_configuration,
             save_configuration,
@@ -2513,10 +2597,17 @@ pub fn run() {
             select_output_folder,
             select_scan_folder,
             clear_log,
-            app_metadata,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running MahoCrawl");
+        .build(tauri::generate_context!())
+        .expect("error while building MahoCrawl")
+        .run(move |_app, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                shutdown_runtime(&runtime);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -2528,12 +2619,24 @@ mod tests {
         let state = Arc::new(Mutex::new(RuntimeState::default()));
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "trap '' INT; while :; do sleep 1; done"]);
-        unsafe { command.pre_exec(|| { if libc::setpgid(0, 0) == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) } }); }
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
         let child = command.spawn().unwrap();
         let pid = child.id();
         state.lock().unwrap().child = Some(child);
         let other = Arc::clone(&state);
-        let _ = thread::spawn(move || { let _guard = other.lock().unwrap(); panic!("poison"); }).join();
+        let _ = thread::spawn(move || {
+            let _guard = other.lock().unwrap();
+            panic!("poison");
+        })
+        .join();
         shutdown_runtime(&state);
         let guard = state.lock().unwrap_err().into_inner();
         assert!(guard.cancel_requested);
@@ -2544,9 +2647,19 @@ mod tests {
     #[test]
     fn failed_stdin_write_reaps_child_and_preserves_stderr() {
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "exec 0<&-; echo rejected >&2; sleep 10"])
-            .stdin(Stdio::piped()).stderr(Stdio::piped());
-        unsafe { command.pre_exec(|| { if libc::setpgid(0, 0) == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) } }); }
+        command
+            .args(["-c", "echo rejected >&2; exec 0<&-; sleep 10"])
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setpgid(0, 0) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
         let mut child = command.spawn().unwrap();
         let error = write_child_stdin(&mut child, &"x".repeat(1024 * 1024)).unwrap_err();
         assert!(error.to_string().contains("rejected"));
@@ -2556,11 +2669,27 @@ mod tests {
     #[test]
     fn desktop_command_contract_uses_background_dispatch_and_minimal_permissions() {
         let source = include_str!("lib.rs");
-        for name in ["read_capture", "read_capture_thumbnail", "list_seo_pages", "list_scan_runs", "load_scan_run", "list_captures", "get_engine_version"] {
-            assert!(source.contains(&format!("#[tauri::command(async)]\nfn {name}(")), "{name} must dispatch off the UI thread");
+        for name in [
+            "read_capture",
+            "read_capture_thumbnail",
+            "list_seo_pages",
+            "list_scan_runs",
+            "load_scan_run",
+            "list_captures",
+            "get_engine_version",
+        ] {
+            assert!(
+                source.contains(&format!("#[tauri::command(async)]\nasync fn {name}(")),
+                "{name} must dispatch off the UI thread"
+            );
         }
-        let capabilities: serde_json::Value = serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        assert!(!capabilities["permissions"].as_array().unwrap().iter().any(|value| value == "dialog:allow-open"));
+        let capabilities: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert!(!capabilities["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "dialog:allow-open"));
         assert!(!source.contains(&["fn app_", "metadata("].concat()));
     }
 
