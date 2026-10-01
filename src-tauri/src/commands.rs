@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::SystemTime;
 use tauri::AppHandle;
+use tauri_plugin_opener::OpenerExt;
 
 use crate::config::{
     config_path, read_configuration, write_configuration, CaptureImage, CaptureItem,
@@ -16,9 +17,9 @@ use crate::paths::{
     discover_scan_run, expand_path, is_open_path_allowed, is_path_allowed, make_output_plans,
     register_output_paths, validate_external_url,
 };
+use crate::platform::{canonicalize, configure_background_command, interrupt_process_tree};
 use crate::process::{
-    clear_start_reservation, emit_status, locate_binary, reserve_start, run_queue,
-    signal_process_group, AppState,
+    clear_start_reservation, emit_status, locate_binary, reserve_start, run_queue, AppState,
 };
 use crate::report::{
     clean_ansi, encode_thumbnail, image_mime_type, list_capture_items, list_seo_page_items,
@@ -69,10 +70,10 @@ pub(crate) fn get_log(state: tauri::State<'_, AppState>) -> Result<String, Strin
 pub(crate) async fn get_engine_version(app: AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let binary = locate_binary(&app).map_err(|error| error.to_string())?;
-        let output = Command::new(binary)
-            .arg("--version")
-            .output()
-            .map_err(|error| error.to_string())?;
+        let mut command = Command::new(binary);
+        command.arg("--version");
+        configure_background_command(&mut command);
+        let output = command.output().map_err(|error| error.to_string())?;
         let text = clean_ansi(&String::from_utf8_lossy(&output.stdout));
         Ok(text
             .lines()
@@ -100,10 +101,10 @@ pub(crate) fn start_crawl(
     let setup = (|| -> Result<(PathBuf, PathBuf, Vec<OutputPlan>, String), String> {
         let requested_base = expand_path(&configuration.output_root);
         fs::create_dir_all(&requested_base).map_err(|error| error.to_string())?;
-        // Resolve aliases such as ~/Pictures -> /Volumes/... before passing paths
-        // to the sidecar. This keeps reports and child-process working directories
-        // on the actual mounted volume, which is also the path macOS protects.
-        let base = fs::canonicalize(&requested_base).unwrap_or(requested_base);
+        // Resolve aliases such as ~/Pictures -> /Volumes/... (macOS) or junctions
+        // (Windows) before passing paths to the sidecar. This keeps reports and
+        // child-process working directories on the actual volume.
+        let base = canonicalize(&requested_base).unwrap_or(requested_base);
         let planning_configuration = CrawlConfiguration {
             output_root: base.to_string_lossy().into_owned(),
             ..configuration.clone()
@@ -186,7 +187,7 @@ pub(crate) fn stop_crawl(app: AppHandle, state: tauri::State<'_, AppState>) -> R
     guard.status.phase = RunPhase::Cancelling;
     guard.status.message = Some("停止処理中".to_string());
     if let Some(child) = guard.child.as_mut() {
-        signal_process_group(child.id(), libc::SIGINT);
+        interrupt_process_tree(child.id());
     }
     drop(guard);
     emit_status(&app, &state.runtime);
@@ -256,7 +257,7 @@ pub(crate) async fn list_scan_runs(
         if !requested.exists() {
             return Ok(Vec::new());
         }
-        let root = fs::canonicalize(&requested).map_err(|error| error.to_string())?;
+        let root = canonicalize(&requested).map_err(|error| error.to_string())?;
         if !root.is_dir() {
             return Err("スキャンの保存先フォルダを指定してください。".to_string());
         }
@@ -322,7 +323,7 @@ pub(crate) async fn load_scan_run(
         if !is_path_allowed(&path, &browse_roots) {
             return Err("一覧に表示されたスキャン以外は開けません。".to_string());
         }
-        let root = fs::canonicalize(&path).map_err(|error| error.to_string())?;
+        let root = canonicalize(&path).map_err(|error| error.to_string())?;
         let (_, status) = discover_scan_run(&root)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "MahoCrawlのスキャン結果が見つかりません。".to_string())?;
@@ -401,7 +402,11 @@ pub(crate) async fn read_capture_thumbnail(
 }
 
 #[tauri::command]
-pub(crate) fn open_path(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+pub(crate) fn open_path(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
     let path = expand_path(path.trim());
     if !path.exists() {
         return Err("指定したパスが見つかりません。".to_string());
@@ -414,21 +419,17 @@ pub(crate) fn open_path(state: tauri::State<'_, AppState>, path: String) -> Resu
     if !allowed {
         return Err("実行で生成した保存先以外は開けません。".to_string());
     }
-    Command::new("open")
-        .arg(path)
-        .status()
-        .map_err(|error| error.to_string())
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err("パスを開けませんでした。".to_string())
-            }
-        })
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|_| "パスを開けませんでした。".to_string())
 }
 
 #[tauri::command]
-pub(crate) fn reveal_path(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+pub(crate) fn reveal_path(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
     let path = expand_path(path.trim());
     let parent = path
         .parent()
@@ -443,35 +444,17 @@ pub(crate) fn reveal_path(state: tauri::State<'_, AppState>, path: String) -> Re
     if !is_path_allowed(&path, &allowed) {
         return Err("実行で生成した保存先以外は表示できません。".to_string());
     }
-    Command::new("open")
-        .arg("-R")
-        .arg(path)
-        .status()
-        .map_err(|error| error.to_string())
-        .and_then(|status| {
-            if status.success() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "フォルダを表示できませんでした: {}",
-                    parent.display()
-                ))
-            }
-        })
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|_| format!("フォルダを表示できませんでした: {}", parent.display()))
 }
 
 #[tauri::command]
-pub(crate) fn open_url(url: String) -> Result<(), String> {
+pub(crate) fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     let validated = validate_external_url(&url)?;
-    let status = Command::new("open")
-        .arg(validated)
-        .status()
-        .map_err(|error| format!("サイトを開けませんでした: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err("サイトを開けませんでした。".to_string())
-    }
+    app.opener()
+        .open_url(validated, None::<&str>)
+        .map_err(|error| format!("サイトを開けませんでした: {error}"))
 }
 
 #[tauri::command]

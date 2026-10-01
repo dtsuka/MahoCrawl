@@ -1,0 +1,119 @@
+# Windows 版のテストとビルド。
+# - Pull Request: Windows 上で Rust / フロントエンドのテストを実行する
+# - v* タグの push・手動実行: SiteOne Crawler と NSIS インストーラーをビルドする
+#   （タグの場合は GitHub Release に添付する）
+name: Windows
+
+on:
+  pull_request:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Test (Windows)
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Test frontend
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+      # tauri-build は externalBin と resources の存在を確認するため、テスト用の空ファイルを置く
+      - name: Create placeholder sidecar and resources
+        run: |
+          mkdir -p src-tauri/binaries Resources/Binaries
+          touch src-tauri/binaries/siteone-crawler-x86_64-pc-windows-msvc.exe
+          touch Resources/Binaries/checksums.sha256
+          echo '{}' > Resources/Binaries/BUILD_METADATA.json
+
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+  build:
+    name: Build (Windows x64)
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build SiteOne Crawler
+        env:
+          SITEONE_TARGETS: x86_64-pc-windows-msvc
+        run: bash scripts/build-siteone-custom.sh
+
+      - name: Generate third-party licenses
+        run: bash scripts/generate-third-party-licenses.sh
+
+      - name: Build installer
+        run: bash scripts/with-remapped-paths.sh npx tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Collect installer
+        id: collect
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          source_path="$(ls src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | head -n 1)"
+          mkdir -p release
+          output="release/MahoCrawl_${version}_x64-setup.exe"
+          cp "$source_path" "$output"
+          echo "path=$output" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MahoCrawl-windows-x64
+          path: ${{ steps.collect.outputs.path }}
+
+      - name: Attach installer to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --draft --title "MahoCrawl $TAG" --notes ""
+          fi
+          gh release upload "$TAG" "${{ steps.collect.outputs.path }}" --clobber

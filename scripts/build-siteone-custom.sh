@@ -15,10 +15,32 @@ CHROMIUMOXIDE_REPO="${CHROMIUMOXIDE_REPO:-https://github.com/mattsse/chromiumoxi
 CHROMIUMOXIDE_REF="${CHROMIUMOXIDE_REF:-v0.9.1}"
 CHROMIUMOXIDE_COMMIT="${CHROMIUMOXIDE_COMMIT:-a7e2bb835b9643410f9e3dc044f0d947e96cbfa4}"
 
-targets=(
-  "aarch64-apple-darwin"
-  "x86_64-apple-darwin"
-)
+# ビルド対象。SITEONE_TARGETS（空白区切り）で上書きできる。
+# 未指定なら macOS では Apple Silicon / Intel、Windows では x86_64 を対象にする。
+if [[ -n "${SITEONE_TARGETS:-}" ]]; then
+  read -r -a targets <<<"$SITEONE_TARGETS"
+else
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) targets=("x86_64-pc-windows-msvc") ;;
+    *) targets=("aarch64-apple-darwin" "x86_64-apple-darwin") ;;
+  esac
+fi
+
+# Windows 向けの実行ファイルには .exe が付く
+exe_suffix_for() {
+  case "$1" in
+    *-windows-*) printf '.exe' ;;
+    *) printf '' ;;
+  esac
+}
+
+sha256_of() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
 
 clone_or_update() {
   local dir="$1"
@@ -104,14 +126,17 @@ for target in "${targets[@]}"; do
   fi
   bash "$project_root/scripts/with-remapped-paths.sh" cargo build --manifest-path "$siteone_dir/Cargo.toml" --release ${lock_args[@]+"${lock_args[@]}"} ${target_args[@]+"${target_args[@]}"}
 
+  exe_suffix="$(exe_suffix_for "$target")"
   if ((${#build_target[@]})); then
-    output="$siteone_dir/target/$target/release/siteone-crawler"
+    output="$siteone_dir/target/$target/release/siteone-crawler$exe_suffix"
   else
-    output="$siteone_dir/target/release/siteone-crawler"
+    output="$siteone_dir/target/release/siteone-crawler$exe_suffix"
   fi
-  dest="$bin_dir/siteone-crawler-$target"
-  install -m 755 "$output" "$dest"
-  shasum -a 256 "$dest" | awk '{print $1 "  siteone-crawler-'$target'"}' >>"$checksum_file"
+  dest_name="siteone-crawler-$target$exe_suffix"
+  dest="$bin_dir/$dest_name"
+  cp "$output" "$dest"
+  chmod 755 "$dest"
+  printf '%s  %s\n' "$(sha256_of "$dest")" "$dest_name" >>"$checksum_file"
 done
 
 cat >"$metadata_dir/BUILD_METADATA.json" <<EOF

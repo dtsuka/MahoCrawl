@@ -466,9 +466,9 @@ pub(crate) fn default_timeout() -> u32 {
 }
 
 pub(crate) fn default_output_root() -> String {
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Pictures/MahoCrawl"))
-        .unwrap_or_else(|| PathBuf::from("/tmp/MahoCrawl"))
+    crate::platform::home_dir()
+        .join("Pictures")
+        .join("MahoCrawl")
         .to_string_lossy()
         .to_string()
 }
@@ -615,6 +615,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    #[cfg(unix)]
     fn configuration_save_replaces_without_following_destination_symlink() {
         use std::os::unix::fs::symlink;
         let root = std::env::temp_dir().join(format!("maho-atomic-{}", std::process::id()));
@@ -801,7 +802,9 @@ mod tests {
             assert_eq!(plans.len(), 1);
             let plan = &plans[0];
             assert_eq!(plan.size_slug, "metadata");
-            assert!(plan.json_report.ends_with("metadata/report.json"));
+            assert!(
+                Path::new(&plan.json_report).ends_with(Path::new("metadata").join("report.json"))
+            );
             let arguments = build_arguments(&configuration, None, plan, "Asia/Tokyo").unwrap();
             assert!(!arguments
                 .iter()
@@ -873,5 +876,13 @@ mod tests {
             configuration.validate(),
             Err(ValidationError::InvalidHttpAuthValue)
         );
+    }
+
+    #[test]
+    fn default_output_root_is_pictures_folder_in_home() {
+        let expected = crate::platform::home_dir()
+            .join("Pictures")
+            .join("MahoCrawl");
+        assert_eq!(PathBuf::from(default_output_root()), expected);
     }
 }

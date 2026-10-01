@@ -15,16 +15,17 @@ pub(crate) fn expand_path(value: &str) -> PathBuf {
     if value == "~" {
         return dirs_home();
     }
-    if let Some(rest) = value.strip_prefix("~/") {
+    if let Some(rest) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
         return dirs_home().join(rest);
     }
     PathBuf::from(value)
 }
 
 pub(crate) fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    crate::platform::home_dir()
 }
 
 pub(crate) fn sanitize_component(value: &str, fallback: &str) -> String {
@@ -134,7 +135,8 @@ pub(crate) fn discover_scan_run(
     if !path.is_dir() {
         return Ok(None);
     }
-    let root = fs::canonicalize(path).map_err(|error| CrawlError::Io(error.to_string()))?;
+    let root =
+        crate::platform::canonicalize(path).map_err(|error| CrawlError::Io(error.to_string()))?;
     let mut size_directories = fs::read_dir(&root)
         .map_err(|error| CrawlError::Io(error.to_string()))?
         .flatten()
@@ -226,7 +228,7 @@ pub fn make_output_plans(
 }
 
 pub(crate) fn canonical_path(path: &Path) -> Option<PathBuf> {
-    fs::canonicalize(path).ok()
+    crate::platform::canonicalize(path).ok()
 }
 
 pub(crate) fn is_path_allowed(path: &Path, allowed_roots: &[PathBuf]) -> bool {
@@ -316,7 +318,12 @@ mod tests {
         fs::create_dir_all(root.join("run")).unwrap();
         fs::write(root.join("private.png"), b"private").unwrap();
         fs::write(root.join("run/capture.png"), b"capture").unwrap();
-        for base in [PathBuf::from("/"), dirs_home(), root.clone()] {
+        let filesystem_root = std::env::temp_dir()
+            .ancestors()
+            .last()
+            .unwrap()
+            .to_path_buf();
+        for base in [filesystem_root, dirs_home(), root.clone()] {
             let mut runtime = RuntimeState::default();
             register_output_paths(&mut runtime, &base, &root.join("run"));
             assert!(is_open_path_allowed(&base, &runtime));
@@ -450,14 +457,29 @@ mod tests {
                 .format("%Y%m%d-%H%M%S")
         )));
         assert_eq!(plans.len(), 3);
-        assert!(plans[0].captures.ends_with("desktop-1440x900/screenshots"));
-        assert!(plans[0]
-            .http_cache_dir
-            .ends_with("desktop-1440x900/.siteone-http-cache"));
-        assert!(plans[1]
-            .html_report
-            .ends_with("tablet-768x1024/report.html"));
-        assert!(plans[2].json_report.ends_with("mobile-390x844/report.json"));
+        let ends_with = |path: &str, parent: &str, name: &str| {
+            Path::new(path).ends_with(Path::new(parent).join(name))
+        };
+        assert!(ends_with(
+            &plans[0].captures,
+            "desktop-1440x900",
+            "screenshots"
+        ));
+        assert!(ends_with(
+            &plans[0].http_cache_dir,
+            "desktop-1440x900",
+            ".siteone-http-cache"
+        ));
+        assert!(ends_with(
+            &plans[1].html_report,
+            "tablet-768x1024",
+            "report.html"
+        ));
+        assert!(ends_with(
+            &plans[2].json_report,
+            "mobile-390x844",
+            "report.json"
+        ));
     }
     #[test]
     fn canonical_open_boundary_rejects_parent_and_accepts_nested_file() {
@@ -471,5 +493,14 @@ mod tests {
         assert!(!is_path_allowed(&root.join("outside.png"), &allowed));
         assert!(!is_path_allowed(&nested.join("../report.html"), &allowed));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn expands_home_prefix_with_either_separator() {
+        let home = crate::platform::home_dir();
+        assert_eq!(expand_path("~"), home);
+        assert_eq!(expand_path("~/captures"), home.join("captures"));
+        assert_eq!(expand_path("~\\captures"), home.join("captures"));
+        assert_eq!(expand_path("captures"), PathBuf::from("captures"));
     }
 }

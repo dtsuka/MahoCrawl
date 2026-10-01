@@ -1,0 +1,12 @@
+# 改行コードを LF に統一する（Windows でのチェックアウト時に CRLF へ変換させない）
+* text=auto eol=lf
+
+# バイナリ
+*.png binary
+*.jpg binary
+*.ico binary
+*.icns binary
+
+# 上流ソースや第三者ライセンス原文の CRLF をそのまま保持する（変換するとパッチが当たらなくなる）
+*.patch -text
+Resources/Licenses/*.txt -text

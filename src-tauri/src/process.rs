@@ -1,8 +1,6 @@
 use serde::Serialize;
 use std::fs;
 use std::io::{BufReader, ErrorKind, Read, Write};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
@@ -13,6 +11,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::config::{
     build_arguments, CaptureViewport, CrawlConfiguration, CrawlError, CrawlStatus, OutputPlan,
     RunPhase, MAX_LOG_LENGTH, MAX_REPORT_LENGTH,
+};
+use crate::platform::{
+    configure_child_command, installed_sidecar_name, interrupt_process_tree, is_executable,
+    kill_process_tree, sidecar_binary_name,
 };
 use crate::report::{filter_non_page_screenshots, list_capture_items};
 
@@ -34,32 +36,24 @@ pub struct AppState {
     pub(crate) runtime: SharedState,
 }
 
-pub(crate) fn binary_name() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "siteone-crawler-aarch64-apple-darwin"
-    } else if cfg!(target_arch = "x86_64") {
-        "siteone-crawler-x86_64-apple-darwin"
-    } else {
-        "siteone-crawler"
-    }
-}
-
 pub(crate) fn locate_binary(app: &AppHandle) -> Result<PathBuf, CrawlError> {
+    let binary_name = sidecar_binary_name();
+    let installed_name = installed_sidecar_name();
     let mut candidates = Vec::new();
     #[cfg(debug_assertions)]
     if let Some(value) = std::env::var_os("SITEONE_CRAWLER_PATH") {
         candidates.push(PathBuf::from(value));
     }
     if let Ok(resource) = app.path().resource_dir() {
-        candidates.push(resource.join(binary_name()));
-        candidates.push(resource.join("binaries").join(binary_name()));
-        candidates.push(resource.join("siteone-crawler"));
+        candidates.push(resource.join(binary_name));
+        candidates.push(resource.join("binaries").join(binary_name));
+        candidates.push(resource.join(&installed_name));
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            candidates.push(parent.join(binary_name()));
-            candidates.push(parent.join("binaries").join(binary_name()));
-            candidates.push(parent.join("siteone-crawler"));
+            candidates.push(parent.join(binary_name));
+            candidates.push(parent.join("binaries").join(binary_name));
+            candidates.push(parent.join(&installed_name));
         }
     }
     // 開発時のみソースツリー内のバイナリを探す。リリースビルドにビルド環境の絶対パスを埋め込まない。
@@ -67,26 +61,16 @@ pub(crate) fn locate_binary(app: &AppHandle) -> Result<PathBuf, CrawlError> {
     candidates.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("binaries")
-            .join(binary_name()),
+            .join(binary_name),
     );
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, target_os = "macos"))]
     candidates.push(PathBuf::from("/opt/homebrew/bin/siteone-crawler"));
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, target_os = "macos"))]
     candidates.push(PathBuf::from("/usr/local/bin/siteone-crawler"));
     candidates
         .into_iter()
         .find(|path| is_executable(path))
         .ok_or(CrawlError::BinaryNotFound)
-}
-
-pub(crate) fn is_executable(path: &Path) -> bool {
-    path.is_file()
-        && (cfg!(not(unix)) || {
-            use std::os::unix::fs::PermissionsExt;
-            fs::metadata(path)
-                .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false)
-        })
 }
 
 pub(crate) fn timezone_or_utc(result: Result<String, ()>) -> String {
@@ -123,17 +107,6 @@ pub(crate) fn append_log(app: &AppHandle, state: &SharedState, text: &str) {
     emit(app, "crawl://output", &serde_json::json!({ "text": text }));
 }
 
-#[cfg(unix)]
-pub(crate) fn signal_process_group(pid: u32, signal: i32) {
-    // A negative PID targets the process group created for this SiteOne run.
-    unsafe {
-        let _ = libc::kill(-(pid as i32), signal);
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn signal_process_group(_pid: u32, _signal: i32) {}
-
 pub(crate) fn was_cancel_requested(state: &SharedState) -> bool {
     state
         .lock()
@@ -166,7 +139,7 @@ pub(crate) fn child_exit_code(child: &mut Child) -> Result<Option<i32>, CrawlErr
 }
 
 pub(crate) fn terminate_child(child: &mut Child) {
-    signal_process_group(child.id(), libc::SIGINT);
+    interrupt_process_tree(child.id());
     let deadline = Instant::now() + Duration::from_millis(200);
     while Instant::now() < deadline {
         if child.try_wait().ok().flatten().is_some() {
@@ -175,7 +148,7 @@ pub(crate) fn terminate_child(child: &mut Child) {
         thread::sleep(Duration::from_millis(10));
     }
     // Kill the entire group even if its leader already exited.
-    signal_process_group(child.id(), libc::SIGKILL);
+    kill_process_tree(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -229,15 +202,7 @@ pub(crate) fn run_child(
     } else {
         command.stdin(Stdio::null());
     }
-    #[cfg(unix)]
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    configure_child_command(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| CrawlError::Io(error.to_string()))?;
@@ -287,12 +252,12 @@ pub(crate) fn run_child(
     loop {
         if was_cancel_requested(state) {
             if cancel_sent_at.is_none() {
-                signal_process_group(child_pid, libc::SIGINT);
+                interrupt_process_tree(child_pid);
                 cancel_sent_at = Some(Instant::now());
             } else if cancel_sent_at
                 .is_some_and(|started| started.elapsed() >= Duration::from_millis(1500))
             {
-                signal_process_group(child_pid, libc::SIGKILL);
+                kill_process_tree(child_pid);
             }
         }
         while let Ok(text) = receiver.try_recv() {
@@ -536,6 +501,8 @@ pub(crate) fn run_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
 
     #[test]
     fn timezone_resolution_uses_system_result_or_utc() {
@@ -543,6 +510,7 @@ mod tests {
         assert_eq!(timezone_or_utc(Err(())), "UTC");
     }
     #[test]
+    #[cfg(unix)]
     fn shutdown_reaps_child_even_when_runtime_is_poisoned() {
         let state = Arc::new(Mutex::new(RuntimeState::default()));
         let mut command = Command::new("/bin/sh");
@@ -572,6 +540,7 @@ mod tests {
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
     }
     #[test]
+    #[cfg(unix)]
     fn failed_stdin_write_reaps_child_and_preserves_stderr() {
         let mut command = Command::new("/bin/sh");
         command
@@ -599,6 +568,7 @@ mod tests {
         assert_eq!(log, "x".repeat(MAX_LOG_LENGTH - 1));
     }
     #[test]
+    #[cfg(unix)]
     fn child_exit_code_keeps_running_separate_from_success_and_failure() {
         for expected in [0, 7] {
             // The pipe keeps the process running without depending on a sleep.

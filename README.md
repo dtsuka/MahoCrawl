@@ -2,7 +2,7 @@
 
 日本語 | [English](README.en.md)
 
-MahoCrawl は、Web サイトをクロールしてページごとのスクリーンショットと SEO 情報をまとめて取得できる macOS アプリです。Desktop・Tablet・Mobile など複数の画面サイズを1回の実行で順番に撮影し、結果をギャラリーで確認できます。
+MahoCrawl は、Web サイトをクロールしてページごとのスクリーンショットと SEO 情報をまとめて取得できる macOS / Windows 向けアプリです。Desktop・Tablet・Mobile など複数の画面サイズを1回の実行で順番に撮影し、結果をギャラリーで確認できます。
 
 クロールと撮影には [SiteOne Crawler](https://github.com/janreges/siteone-crawler) を使用しています（アプリに同梱済みのため、別途インストールは不要です）。
 
@@ -12,20 +12,25 @@ MahoCrawl は、Web サイトをクロールしてページごとのスクリー
 
 ## 動作環境
 
-- macOS 13 以降
-- Apple Silicon（M1 以降）または Intel の Mac
+- macOS 13 以降（Apple Silicon（M1 以降）または Intel の Mac）
+- Windows 10 / 11（64ビット版）※ベータ版
 - Google Chrome などの Chromium 系ブラウザ（スクリーンショット撮影に使用）
 
 ## ダウンロードとインストール
 
-1. [Releases ページ](https://github.com/dtsuka/MahoCrawl/releases/latest)を開き、お使いの Mac に合わせて zip をダウンロードします。
-   - Apple Silicon（M1 以降）: `MahoCrawl_<version>_aarch64.zip`
-   - Intel: `MahoCrawl_<version>_x86_64.zip`
-   - どちらか分からない場合は、メニューバーの Apple メニュー →「この Mac について」の「チップ」（または「プロセッサ」）を確認してください。「Apple M」で始まれば Apple Silicon、「Intel」と書かれていれば Intel です。
+[Releases ページ](https://github.com/dtsuka/MahoCrawl/releases/latest)から、お使いのパソコンに合わせてファイルをダウンロードします。
+
+| ファイル | 対象 |
+| --- | --- |
+| `MahoCrawl_<version>_aarch64.zip` | Apple Silicon（M1 以降）の Mac |
+| `MahoCrawl_<version>_x86_64.zip` | Intel の Mac |
+| `MahoCrawl_<version>_x64-setup.exe` | Windows（64ビット版） |
+
+### macOS
+
+1. Mac の種類が分からない場合は、メニューバーの Apple メニュー →「この Mac について」の「チップ」（または「プロセッサ」）を確認してください。「Apple M」で始まれば Apple Silicon、「Intel」と書かれていれば Intel です。
 2. ダウンロードした zip をダブルクリックして展開します。
 3. `MahoCrawl.app` を「アプリケーション」フォルダへ移動します。
-
-### 初回起動
 
 MahoCrawl は Apple の Developer ID による署名・公証を行っていないため、初回起動時に「開発元を確認できないため開けません」などの警告が表示されます。次のいずれかの方法で起動してください。
 
@@ -33,6 +38,15 @@ MahoCrawl は Apple の Developer ID による署名・公証を行っていな�
 - 一度起動を試みた後、「システム設定」→「プライバシーとセキュリティ」で「このまま開く」を選ぶ
 
 2回目以降は通常どおりダブルクリックで起動できます。
+
+### Windows（ベータ版）
+
+Windows 版はベータ版です。不具合を見つけた場合は [Issues](https://github.com/dtsuka/MahoCrawl/issues) でお知らせください。
+
+1. ダウンロードした `MahoCrawl_<version>_x64-setup.exe` を実行し、画面の案内に従ってインストールします。管理者権限は不要です。
+2. インストール後、スタートメニューから MahoCrawl を起動します。
+
+MahoCrawl はコード署名を行っていないため、インストーラーの実行時に「Windows によって PC が保護されました」と表示される場合があります。その場合は「詳細情報」を選び、「実行」をクリックしてください。
 
 ## 使い方
 
@@ -71,11 +85,11 @@ Basic 認証で保護されたサイトは、ユーザー名とパスワード�
 
 ### ブラウザについて
 
-スクリーンショットの撮影には、Mac にインストールされている Google Chrome などの Chromium 系ブラウザを使用します。自動で見つからない場合は「ブラウザのパス」で指定してください。「見つからない場合に自動取得」をオンにすると、ブラウザが見つからないときに撮影用ブラウザを自動でダウンロードします。
+スクリーンショットの撮影には、パソコンにインストールされている Google Chrome などの Chromium 系ブラウザを使用します。自動で見つからない場合は「ブラウザのパス」で指定してください。「見つからない場合に自動取得」をオンにすると、ブラウザが見つからないときに撮影用ブラウザを自動でダウンロードします。
 
 ## 保存されるファイル
 
-結果はデフォルトで `~/Pictures/MahoCrawl/` に保存されます（保存先は変更できます）。実行ごとに日時入りのフォルダ、キャプチャサイズごとに専用フォルダが作られます。
+結果はデフォルトでホームフォルダ内の `Pictures/MahoCrawl/`（macOS では `~/Pictures/MahoCrawl/`、Windows では `C:\Users\<ユーザー名>\Pictures\MahoCrawl\`）に保存されます（保存先は変更できます）。実行ごとに日時入りのフォルダ、キャプチャサイズごとに専用フォルダが作られます。
 
 ```text
 ~/Pictures/MahoCrawl/example.com-20260818-120000/

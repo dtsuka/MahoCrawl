@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 mod commands;
 mod config;
 mod paths;
+mod platform;
 mod process;
 mod report;
 
@@ -19,6 +20,7 @@ pub fn run() {
     let runtime = Arc::new(Mutex::new(RuntimeState::default()));
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState {
             runtime: Arc::clone(&runtime),
         })

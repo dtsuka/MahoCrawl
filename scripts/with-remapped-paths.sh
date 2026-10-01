@@ -11,10 +11,18 @@ fi
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+home_dir="$HOME"
+
+# Windows の Git Bash では /c/Users/... 形式になるため、rustc が扱う C:\Users\... 形式に変換する
+if command -v cygpath >/dev/null 2>&1; then
+  home_dir="$(cygpath -w "$home_dir")"
+  cargo_home="$(cygpath -w "$cargo_home")"
+  project_root="$(cygpath -w "$project_root")"
+fi
 
 # rustc は後に指定した一致ルールを優先するため、広い範囲（ホーム）から順に並べる。
 remap_flags=(
-  "--remap-path-prefix=$HOME=/home"
+  "--remap-path-prefix=$home_dir=/home"
   "--remap-path-prefix=$cargo_home=/cargo"
   "--remap-path-prefix=$project_root=/mahocrawl"
 )

@@ -131,7 +131,7 @@ const previewImageMode = defineModel<PreviewImageMode>('previewImageMode', { req
             type="button"
             :disabled="!isTauri || !selectedCapture.path"
             @click="revealCapture(selectedCapture)"
-          >Finderで表示</button>
+          >フォルダで表示</button>
         </div>
       </div>
       <div class="preview-image-area">
@@ -157,7 +157,7 @@ const previewImageMode = defineModel<PreviewImageMode>('previewImageMode', { req
           <div v-else-if="previewError" class="preview-error">
             <strong>プレビューを読み込めませんでした</strong>
             <span>{{ previewError }}</span>
-            <small>元画像を開くか、Finderで表示してください。</small>
+            <small>元画像を開くか、フォルダで表示してください。</small>
             <button v-if="selectedCapture.path" type="button" @click="retryPreview">再試行</button>
           </div>
           <div v-else-if="!isTauri" class="mock-page large">
