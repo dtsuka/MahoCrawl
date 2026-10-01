@@ -117,7 +117,9 @@ MahoCrawl は SiteOne Crawler v2.5.1 ベースの非公式カスタムビルド�
 npm run build:siteone
 ```
 
-パッチは `patches/` に、ビルド元のバージョン・SHA-256 はビルド時に `Resources/Binaries/` へ出力されます（バイナリと同様に Git 管理対象外）。Tauri externalBin は次のターゲット名を使用します。
+パッチは `patches/` に、ビルド元のバージョン・SHA-256 はビルド時に `Resources/Binaries/` へ出力されます（バイナリと同様に Git 管理対象外）。
+ビルド時は、`SITEONE_COMMIT` と `CHROMIUMOXIDE_COMMIT` 環境変数で上流ソースのコミット SHA を指定できます。デフォルト値はスクリプト内に記録され、タグの付け替えによるサプライチェーンリスクを防ぐため、取得後に SHA が一致することを検証します。
+Tauri externalBin は次のターゲット名を使用します。
 
 - `siteone-crawler-aarch64-apple-darwin`
 - `siteone-crawler-x86_64-apple-darwin`
