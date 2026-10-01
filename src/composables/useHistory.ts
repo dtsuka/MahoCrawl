@@ -15,7 +15,6 @@ export interface UseHistoryContext {
   currentRunSnapshot: () => RunSnapshot | null
   refreshCaptures: (snapshot?: RunSnapshot | null) => Promise<void>
   refreshSeoPages: (snapshot?: RunSnapshot | null) => Promise<void>
-  infoMessage: Ref<string>
   isDisposed: () => boolean
 }
 
@@ -30,7 +29,6 @@ export function useHistory(context: UseHistoryContext) {
     currentRunSnapshot,
     refreshCaptures,
     refreshSeoPages,
-    infoMessage,
     isDisposed,
   } = context
 
@@ -165,7 +163,6 @@ export function useHistory(context: UseHistoryContext) {
       closeHistory()
       const snapshot = currentRunSnapshot()
       if (snapshot) await Promise.all([refreshCaptures(snapshot), refreshSeoPages(snapshot)])
-      infoMessage.value = '過去のスキャンを開きました。'
     } catch (error) {
       if (!isDisposed() && historyOpen.value) historyError.value = `スキャンを開けません。${String(error)}`
     } finally {
