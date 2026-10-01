@@ -47,6 +47,15 @@ export interface CrawlStatus {
   message: string | null
 }
 
+export interface ScanRunSummary {
+  runId: string
+  path: string
+  modifiedAt: number
+  sizeCount: number
+  captureCount: number
+  hasHtmlReport: boolean
+}
+
 export interface OutputPlan {
   root: string
   sizeRoot: string
