@@ -8,11 +8,13 @@ const LICENSE_FILE_PATTERN = /^(licen[cs]e|copying)/i;
 
 /** npm ls から本番依存のディレクトリ一覧を取得する（先頭はプロジェクト自身なので除く） */
 function listProductionPackageDirs(projectRoot) {
+  // Windows の npm は npm.cmd のため、シェル経由で起動する（引数は固定値のみ）
   const output = execFileSync("npm", ["ls", "--omit=dev", "--all", "--parseable"], {
     cwd: projectRoot,
     encoding: "utf8",
+    shell: process.platform === "win32",
   });
-  const dirs = output.split("\n").filter(Boolean).slice(1);
+  const dirs = output.split(/\r?\n/).filter(Boolean).slice(1);
   return [...new Set(dirs)];
 }
 
