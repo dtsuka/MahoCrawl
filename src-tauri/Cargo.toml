@@ -1,6 +1,6 @@
 [package]
 name = "maho-crawl"
-version = "0.2.2"
+version = "0.3.0"
 description = "MahoCrawl website capture workspace"
 authors = ["MahoCrawl"]
 edition = "2021"
