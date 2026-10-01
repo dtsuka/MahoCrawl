@@ -5,14 +5,20 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// 環境変数の値からホームディレクトリを決める。Windows では HOME が無く USERPROFILE を使う。
+/// 環境変数の値からホームディレクトリを決める。
+/// Windows では Git Bash などが `/c/Users/...` 形式の HOME を設定することがあるため、
+/// ドライブ付きの USERPROFILE を優先する。
 pub(crate) fn home_dir_from(
     os: &str,
     home: Option<OsString>,
     user_profile: Option<OsString>,
 ) -> Option<PathBuf> {
-    let _ = os;
-    [home, user_profile]
+    let candidates = if os == "windows" {
+        [user_profile, home]
+    } else {
+        [home, user_profile]
+    };
+    candidates
         .into_iter()
         .flatten()
         .find(|value| !value.is_empty())
