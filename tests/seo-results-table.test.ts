@@ -48,6 +48,32 @@ const sizes: CaptureViewport[] = [
 ]
 
 describe('SeoResultsTable', () => {
+  it.each(['https://example.test/', ' HTTP://example.test/path '])('emits valid URL %s without opening captures or details', async (url) => {
+    const wrapper = mount(SeoResultsTable, { props: { pages: [page({ url })], sizes } })
+    const link = wrapper.find('button.url-text, a.url-text')
+    expect(link.exists()).toBe(true)
+    await link.trigger('click')
+    expect(wrapper.emitted('open-url')?.[0]).toEqual([url.trim()])
+    expect(wrapper.emitted('open-capture')).toBeUndefined()
+    expect(wrapper.find('.detail-row').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each(['', 'javascript:alert(1)', 'https://', 'https:///path', 'https://exa\n mple.test', '-https://example.test'])('keeps invalid URL %s as text', (url) => {
+    const wrapper = mount(SeoResultsTable, { props: { pages: [page({ url })], sizes } })
+    expect(wrapper.find('button.url-text, a.url-text').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('highlights only the active page and size', () => {
+    const target = page()
+    const wrapper = mount(SeoResultsTable, { props: { pages: [target], sizes, activePageUrl: target.url, activeSizeId: 'mobile' } })
+    expect(wrapper.find('tr.result-row').classes()).toContain('is-active')
+    expect(wrapper.findAll('.size-button.is-active')).toHaveLength(1)
+    expect(wrapper.find('.size-button.is-active').text()).toBe('キャプチャMobile')
+    wrapper.unmount()
+  })
+
   it('keeps one main row, preserves size id order, and emits the clicked button as opener', async () => {
     const target = page()
     const wrapper = mount(SeoResultsTable, { props: { pages: [target], sizes } })
