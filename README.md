@@ -2,20 +2,39 @@
 
 MahoCrawl は、SiteOne Crawler v2.5.1 を安全な Tauri v2 bridge から呼び出す macOS 向けサイトキャプチャワークスペースです。Vue 3 + TypeScript + Vite の画面で URL、UA、撮影条件、複数のキャプチャサイズを設定し、1回の実行で有効サイズを順次処理します。
 
+## ダウンロード
+
+ビルド済みのアプリは [GitHub Releases](../../releases) から入手できます。zip を展開し、`MahoCrawl.app` を「アプリケーション」フォルダへ移動して起動してください。SiteOne Crawler はアプリに同梱されているため、別途インストールは不要です。
+
+Apple の Developer ID で署名・公証していないビルドの場合、初回起動時に「開発元を確認できないため開けません」と表示されます。その場合は次のいずれかで起動してください。
+
+- Finder で `MahoCrawl.app` を右クリック（Control + クリック）し、「開く」を選ぶ
+- 一度起動を試みた後、「システム設定」→「プライバシーとセキュリティ」で「このまま開く」を選ぶ
+
+実キャプチャには Google Chrome などの Chromium 系ブラウザが必要です。
+
 ## 構成
 
 - `src/`: Vue 3 UI、設定 CRUD、ギャラリー、ログ、フロント側検証
 - `src-tauri/src/lib.rs`: 設定永続化、入力検証、SiteOne の限定コマンド、sidecar process state、イベント配信、キャプチャ列挙
-- `src-tauri/binaries/`: Tauri externalBin 規約に合わせた arm64 / x86_64 の SiteOne Crawler
-- `Resources/Licenses/`: 同梱 SiteOne Crawler の MIT ライセンス
+- `src-tauri/binaries/`: Tauri externalBin 規約に合わせた arm64 / x86_64 の SiteOne Crawler（`npm run build:siteone` で生成。Git 管理対象外）
+- `patches/`: SiteOne Crawler / chromiumoxide へのカスタムパッチ
+- `Resources/Licenses/`: 同梱 SiteOne Crawler のライセンスと第三者ライセンス一覧
 - `docs/design/maho-crawl-tauri-concept.png`: 実装のレイアウト・配色基準
 
 フロントエンドから任意の shell コマンドは実行できません。sidecar の起動は Rust の `start_crawl` に限定し、引数は `Vec<String>` として渡します。停止、レポート/保存先/元画像を開く操作も Rust command の個別引数として扱います。
 
 ## 開発・テスト
 
+ソースからビルドする場合は、Node.js と Rust（rustup）が必要です。SiteOne Crawler のバイナリはリポジトリに含まれていないため、最初にカスタムビルドを生成してください（数分かかります）。
+
 ```bash
 npm install
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+npm run build:siteone
+```
+
+```bash
 npm run dev
 npm run test
 npm run build
@@ -39,6 +58,8 @@ macOS のリリース用アプリは次で作成します。
 ```bash
 npm run build:app
 ```
+
+`build:app` は第三者ライセンス一覧（`Resources/Licenses/THIRD_PARTY_LICENSES.txt`）を再生成してからアプリをビルドします。事前に `npm run build:siteone` と `cargo install cargo-about --locked --features cli` が必要です。Rust のビルド成果物にはローカルの絶対パスを残さないよう `--remap-path-prefix` を付けています。
 
 ビルド成功後、`src-tauri/target/release/bundle/macos/MahoCrawl.app` をプロジェクト直下の `release/MahoCrawl.app` に自動コピーします。次回以降はコピー完了後に前回のアプリを置き換えます。`release/` は Git 管理対象外です。
 
@@ -96,27 +117,39 @@ MahoCrawl は SiteOne Crawler v2.5.1 ベースの非公式カスタムビルド�
 npm run build:siteone
 ```
 
-ビルド元の commit、パッチ、SHA-256 は `patches/` と `Resources/Binaries/` に記録されます。Tauri externalBin は次のターゲット名を使用します。
+パッチは `patches/` に、ビルド元のバージョン・SHA-256 はビルド時に `Resources/Binaries/` へ出力されます（バイナリと同様に Git 管理対象外）。Tauri externalBin は次のターゲット名を使用します。
 
 - `siteone-crawler-aarch64-apple-darwin`
 - `siteone-crawler-x86_64-apple-darwin`
 
 Intel 向けビルドには `rustup target add x86_64-apple-darwin` が必要です。更新後は `siteone-crawler-* --version`、`cargo test`、`npm run build`、`cargo check` を実行してください。SiteOne の CLI に存在しない独自フラグは渡しません。現在の v2.5.1 には cookie banner 専用 CLI フラグがないため、設定値は保存しつつ、UIでは「現在未対応」と明示して操作を無効化しています。
 
-Basic 認証のパスワードは `configuration.json` とブラウザの localStorage へ保存しません。アプリ再起動後は再入力が必要です。第三者ライセンスは `Resources/Licenses/THIRD_PARTY_NOTICES.txt` を参照してください。
+Basic 認証のパスワードは `configuration.json` とブラウザの localStorage へ保存しません。アプリ再起動後は再入力が必要です。第三者ライセンスは `Resources/Licenses/THIRD_PARTY_NOTICES.txt` と `Resources/Licenses/THIRD_PARTY_LICENSES.txt` を参照してください。依存関係を更新したら `npm run licenses` で一覧を再生成してください。
 
 ## 配布上の制約
 
-同梱バイナリは MIT ライセンスです。Developer ID 署名、hardened runtime、notarization、アプリ/サードパーティ依存のライセンス棚卸しは配布前に別途必要です。実キャプチャには Chromium 系ブラウザが必要で、利用者が許可した場合のみ SiteOne の自動ダウンロードを有効にできます。ログやレポートには対象サイトの情報が含まれるため、許可を得たサイトだけを対象にしてください。
+同梱バイナリは MIT ライセンスです。第三者依存のライセンス本文は `THIRD_PARTY_LICENSES.txt` としてアプリに同梱されます。Developer ID 署名、hardened runtime、notarization は配布前に別途必要です。実キャプチャには Chromium 系ブラウザが必要で、利用者が許可した場合のみ SiteOne の自動ダウンロードを有効にできます。ログやレポートには対象サイトの情報が含まれるため、許可を得たサイトだけを対象にしてください。
 
 配布前の署名・公証は次の流れです。
 
 ```bash
 npm run build:app
-shasum -a 256 -c Resources/Binaries/checksums.sha256
+(cd src-tauri/binaries && shasum -a 256 -c ../../Resources/Binaries/checksums.sha256)
 codesign --force --options runtime --deep --sign "Developer ID Application: <Your Name>" release/MahoCrawl.app
 xcrun notarytool submit release/MahoCrawl.app --keychain-profile "<profile>" --wait
 xcrun stapler staple release/MahoCrawl.app
 ```
 
+GitHub Releases へは `release/MahoCrawl.app` を zip にして添付します。
+
+```bash
+ditto -c -k --keepParent release/MahoCrawl.app release/MahoCrawl-macos.zip
+```
+
 カスタム SiteOne の stdin 認証は `scripts/test-siteone-auth-integration.sh` でローカル検証できます。
+
+## ライセンス
+
+MahoCrawl は [MIT License](LICENSE) で公開しています。同梱する第三者ソフトウェアのライセンスは `Resources/Licenses/` を参照してください。
+
+このツールでクロール・撮影するサイトは、運営者の許可を得たもの、または利用規約・robots.txt に反しないものに限ってください。リクエスト速度や並列数は対象サイトに過度な負荷をかけない値に設定してください。
