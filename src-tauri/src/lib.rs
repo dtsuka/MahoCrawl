@@ -1045,7 +1045,7 @@ fn run_child(
         .stderr(Stdio::piped())
         .env("NO_COLOR", "1")
         .env("TERM", "dumb");
-    if let Some(payload) = stdin_payload {
+    if stdin_payload.is_some() {
         command.stdin(Stdio::piped());
     } else {
         command.stdin(Stdio::null());
