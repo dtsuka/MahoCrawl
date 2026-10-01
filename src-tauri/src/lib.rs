@@ -447,6 +447,7 @@ struct RuntimeState {
     start_in_progress: bool,
     child: Option<Child>,
     allowed_open_roots: Vec<PathBuf>,
+    allowed_open_exact_paths: Vec<PathBuf>,
     history_browse_roots: Vec<PathBuf>,
 }
 
@@ -701,12 +702,9 @@ pub fn make_output_plans(
     let url =
         Url::parse(configuration.target_url.trim()).map_err(|_| ValidationError::InvalidUrl)?;
     let host = sanitize_component(url.host_str().unwrap_or("website"), "website");
-    let timestamp = now
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default();
-    let run_id = format!("{}-{}", host, timestamp);
-    let root = expand_path(&configuration.output_root).join(&run_id);
+    let timestamp = chrono::DateTime::<Local>::from(now).format("%Y%m%d-%H%M%S");
+    let run_id = format!("{host}-{timestamp}");
+    let root = make_unique_run_root(&expand_path(&configuration.output_root).join(&run_id));
     let mut plans = Vec::new();
     plans.extend(output_plans_for_root(
         &root,
@@ -862,6 +860,26 @@ fn is_path_allowed(path: &Path, allowed_roots: &[PathBuf]) -> bool {
         .iter()
         .filter_map(|root| canonical_path(root))
         .any(|root| canonical_target.starts_with(root))
+}
+
+fn register_output_paths(runtime: &mut RuntimeState, base: &Path, root: &Path) {
+    runtime.allowed_open_exact_paths = vec![base.to_path_buf()];
+    runtime.allowed_open_roots = vec![root.to_path_buf()];
+}
+
+fn is_open_path_allowed(path: &Path, runtime: &RuntimeState) -> bool {
+    is_path_allowed(path, &runtime.allowed_open_roots)
+        || canonical_path(path).is_some_and(|target| {
+            runtime
+                .allowed_open_exact_paths
+                .iter()
+                .filter_map(|path| canonical_path(path))
+                .any(|path| path == target)
+        })
+}
+
+fn timezone_or_utc(result: Result<String, ()>) -> String {
+    result.unwrap_or_else(|_| "UTC".into())
 }
 
 fn image_mime_type(path: &Path) -> Option<&'static str> {
@@ -1264,7 +1282,12 @@ fn run_queue(
             },
         );
         append_log(&app, &state, &step_label);
-        let arguments = match build_arguments(&configuration, viewport, plan, "Asia/Tokyo") {
+        let arguments = match build_arguments(
+            &configuration,
+            viewport,
+            plan,
+            &timezone_or_utc(iana_time_zone::get_timezone().map_err(|_| ())),
+        ) {
             Ok(arguments) => arguments,
             Err(error) => {
                 append_log(&app, &state, &format!("実行引数エラー: {}\n", error));
@@ -2129,8 +2152,6 @@ fn start_crawl(
         .map_err(|error| error.to_string())?;
     let enabled_count = configuration.enabled_captures().len();
     let run_captures = configuration.enabled_captures();
-    let url = Url::parse(configuration.target_url.trim())
-        .map_err(|_| ValidationError::InvalidUrl.to_string())?;
     reserve_start(&state.runtime)?;
     let setup = (|| -> Result<(PathBuf, PathBuf, Vec<OutputPlan>, String), String> {
         let requested_base = expand_path(&configuration.output_root);
@@ -2139,15 +2160,14 @@ fn start_crawl(
         // to the sidecar. This keeps reports and child-process working directories
         // on the actual mounted volume, which is also the path macOS protects.
         let base = fs::canonicalize(&requested_base).unwrap_or(requested_base);
-        let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
-        let base_run = base.join(format!(
-            "{}-{}",
-            sanitize_component(url.host_str().unwrap_or("website"), "website"),
-            timestamp
-        ));
-        let root = make_unique_run_root(&base_run);
+        let planning_configuration = CrawlConfiguration {
+            output_root: base.to_string_lossy().into_owned(),
+            ..configuration.clone()
+        };
+        let (root, plans) = make_output_plans(&planning_configuration, SystemTime::now())
+            .map_err(|error| error.to_string())?;
+        let root = PathBuf::from(root);
         fs::create_dir_all(&root).map_err(|error| error.to_string())?;
-        let plans = output_plans_for_root(&root, &run_captures);
         let run_id = root
             .file_name()
             .and_then(|value| value.to_str())
@@ -2185,7 +2205,7 @@ fn start_crawl(
     }
     emit_status(&app, &state.runtime);
     if let Ok(mut guard) = state.runtime.lock() {
-        guard.allowed_open_roots = vec![base.clone(), root.clone()];
+        register_output_paths(&mut guard, &base, &root);
     }
     let thread_state = Arc::clone(&state.runtime);
     let thread_app = app.clone();
@@ -2445,10 +2465,8 @@ fn open_path(state: tauri::State<'_, AppState>, path: String) -> Result<(), Stri
     let allowed = state
         .runtime
         .lock()
-        .map_err(|_| "パスの許可情報を読み込めません。".to_string())?
-        .allowed_open_roots
-        .iter()
-        .any(|root| is_path_allowed(&path, std::slice::from_ref(root)));
+        .map(|guard| is_open_path_allowed(&path, &guard))
+        .map_err(|_| "パスの許可情報を読み込めません。".to_string())?;
     if !allowed {
         return Err("実行で生成した保存先以外は開けません。".to_string());
     }
@@ -2626,7 +2644,10 @@ mod tests {
             assert!(is_open_path_allowed(&base, &runtime));
             assert!(!is_open_path_allowed(&root.join("private.png"), &runtime));
             assert!(!is_path_allowed(&base, &runtime.allowed_open_roots));
-            assert!(is_path_allowed(&root.join("run/capture.png"), &runtime.allowed_open_roots));
+            assert!(is_path_allowed(
+                &root.join("run/capture.png"),
+                &runtime.allowed_open_roots
+            ));
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -2642,8 +2663,15 @@ mod tests {
         use chrono::TimeZone;
         let base = std::env::temp_dir().join(format!("maho-plans-{}", std::process::id()));
         fs::create_dir_all(&base).unwrap();
-        let configuration = CrawlConfiguration { target_url: "https://example.com".into(), output_root: base.to_string_lossy().into(), ..Default::default() };
-        let now = Local.with_ymd_and_hms(2026, 10, 1, 12, 34, 56).single().unwrap();
+        let configuration = CrawlConfiguration {
+            target_url: "https://example.com".into(),
+            output_root: base.to_string_lossy().into(),
+            ..Default::default()
+        };
+        let now = Local
+            .with_ymd_and_hms(2026, 10, 1, 12, 34, 56)
+            .single()
+            .unwrap();
         let (root, plans) = make_output_plans(&configuration, now.into()).unwrap();
         assert!(root.ends_with("example.com-20261001-123456"));
         fs::create_dir_all(&root).unwrap();
@@ -3189,7 +3217,11 @@ mod tests {
         let configuration = CrawlConfiguration::default();
         let (root, plans) =
             make_output_plans(&configuration, UNIX_EPOCH + Duration::from_secs(1234)).unwrap();
-        assert!(root.ends_with(&format!("example.com-{}", chrono::DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(1234)).format("%Y%m%d-%H%M%S"))));
+        assert!(root.ends_with(&format!(
+            "example.com-{}",
+            chrono::DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(1234))
+                .format("%Y%m%d-%H%M%S")
+        )));
         assert_eq!(plans.len(), 3);
         assert!(plans[0].captures.ends_with("desktop-1440x900/screenshots"));
         assert!(plans[0]
