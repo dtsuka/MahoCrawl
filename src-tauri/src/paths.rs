@@ -15,16 +15,17 @@ pub(crate) fn expand_path(value: &str) -> PathBuf {
     if value == "~" {
         return dirs_home();
     }
-    if let Some(rest) = value.strip_prefix("~/") {
+    if let Some(rest) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
         return dirs_home().join(rest);
     }
     PathBuf::from(value)
 }
 
 pub(crate) fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    crate::platform::home_dir()
 }
 
 pub(crate) fn sanitize_component(value: &str, fallback: &str) -> String {
@@ -134,7 +135,8 @@ pub(crate) fn discover_scan_run(
     if !path.is_dir() {
         return Ok(None);
     }
-    let root = fs::canonicalize(path).map_err(|error| CrawlError::Io(error.to_string()))?;
+    let root =
+        crate::platform::canonicalize(path).map_err(|error| CrawlError::Io(error.to_string()))?;
     let mut size_directories = fs::read_dir(&root)
         .map_err(|error| CrawlError::Io(error.to_string()))?
         .flatten()
@@ -226,7 +228,7 @@ pub fn make_output_plans(
 }
 
 pub(crate) fn canonical_path(path: &Path) -> Option<PathBuf> {
-    fs::canonicalize(path).ok()
+    crate::platform::canonicalize(path).ok()
 }
 
 pub(crate) fn is_path_allowed(path: &Path, allowed_roots: &[PathBuf]) -> bool {
