@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
+import { pageSizeOptions } from '../gallery'
 import { externalUrl } from '../urls'
 import type { CaptureViewport, SeoPageItem } from '../types'
 
@@ -125,27 +126,12 @@ onBeforeUnmount(() => {
   window.removeEventListener('blur', finishResize)
 })
 
-interface PageSizeOption {
-  id: string
-  label: string
-}
-
 function valueOrMissing(value: string | null | undefined): string {
   return value?.trim() || '未取得'
 }
 
 function hasValue(value: string | null | undefined): boolean {
   return Boolean(value?.trim())
-}
-
-function pageSizeOptions(page: SeoPageItem): PageSizeOption[] {
-  return page.sizeIds.map((id, index) => ({
-    id,
-    label: page.captureBySize?.[id]?.sizeLabel?.trim()
-      || props.sizes.find((size) => size.id === id)?.label?.trim()
-      || (page.sizeIds.length === page.sizeLabels.length ? page.sizeLabels[index]?.trim() : '')
-      || id,
-  }))
 }
 
 function isExpanded(url: string): boolean {
@@ -262,9 +248,9 @@ function detailGroups(page: SeoPageItem): Array<{ id: string; label: string; ent
                 </button>
               </th>
               <td>
-                <div v-if="pageSizeOptions(page).length" class="size-list">
+                <div v-if="pageSizeOptions(page, sizes).length" class="size-list">
                   <button
-                    v-for="size in pageSizeOptions(page)"
+                    v-for="size in pageSizeOptions(page, sizes)"
                     :key="size.id"
                     class="size-button"
                     :class="{ 'is-active': page.url === activePageUrl && size.id === activeSizeId }"
