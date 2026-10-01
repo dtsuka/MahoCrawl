@@ -439,7 +439,7 @@ enum CrawlError {
     Configuration(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct RuntimeState {
     status: CrawlStatus,
     log: String,
@@ -448,20 +448,6 @@ struct RuntimeState {
     child: Option<Child>,
     allowed_open_roots: Vec<PathBuf>,
     history_browse_roots: Vec<PathBuf>,
-}
-
-impl Default for RuntimeState {
-    fn default() -> Self {
-        Self {
-            status: CrawlStatus::default(),
-            log: String::new(),
-            cancel_requested: false,
-            start_in_progress: false,
-            child: None,
-            allowed_open_roots: Vec::new(),
-            history_browse_roots: Vec::new(),
-        }
-    }
 }
 
 type SharedState = Arc<Mutex<RuntimeState>>;
@@ -564,20 +550,7 @@ fn output_plan_for(root: &Path, viewport: Option<&CaptureViewport>) -> OutputPla
     let size_slug = viewport
         .map(safe_size_slug)
         .unwrap_or_else(|| "metadata".into());
-    let size_root = root.join(&size_slug);
-    OutputPlan {
-        root: root.to_string_lossy().to_string(),
-        size_root: size_root.to_string_lossy().to_string(),
-        captures: size_root.join("screenshots").to_string_lossy().to_string(),
-        http_cache_dir: size_root
-            .join(".siteone-http-cache")
-            .to_string_lossy()
-            .to_string(),
-        html_report: size_root.join("report.html").to_string_lossy().to_string(),
-        json_report: size_root.join("report.json").to_string_lossy().to_string(),
-        text_report: size_root.join("report.txt").to_string_lossy().to_string(),
-        size_slug,
-    }
+    existing_output_plan(root, &root.join(size_slug))
 }
 
 fn output_plans_for_root(root: &Path, captures: &[CaptureViewport]) -> Vec<OutputPlan> {
@@ -709,7 +682,7 @@ fn discover_scan_run(path: &Path) -> Result<Option<(ScanRunSummary, CrawlStatus)
         phase: RunPhase::Succeeded,
         run_id: Some(run_id),
         size_index: plans.len(),
-        size_total: run_captures.len(),
+        size_total: plans.len(),
         current_size_id: None,
         current_size_label: None,
         current_plan: plans.first().cloned(),
@@ -1531,9 +1504,7 @@ fn resolve_screenshot_path(
 }
 
 fn capture_item_for_path(path: &Path, viewport: &CaptureViewport) -> Option<CaptureItem> {
-    if image_mime_type(path).is_none() {
-        return None;
-    }
+    image_mime_type(path)?;
     let metadata = fs::metadata(path).ok()?;
     if !metadata.is_file() {
         return None;
@@ -1568,7 +1539,6 @@ fn filter_non_page_screenshots(
     let data = fs::read(report_path).map_err(|error| CrawlError::Io(error.to_string()))?;
     let report: serde_json::Value = serde_json::from_slice(&data)
         .map_err(|error| CrawlError::Io(format!("JSONレポートを読み込めません: {}", error)))?;
-    let allowed_roots = [screenshot_dir.to_path_buf()];
     let mut removed = 0;
     for row in report_rows(&report, "browser-screenshots") {
         let Some(raw_url) = row.get("url").and_then(serde_json::Value::as_str) else {
@@ -1580,10 +1550,9 @@ fn filter_non_page_screenshots(
         let Some(raw_path) = row.get("path").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        let path = PathBuf::from(raw_path);
-        if !is_path_allowed(&path, &allowed_roots) {
+        let Some(path) = resolve_screenshot_path(report_path, screenshot_dir, raw_path) else {
             continue;
-        }
+        };
         if fs::remove_file(&path).is_ok() {
             removed += 1;
         }
@@ -2564,10 +2533,12 @@ mod tests {
         let report = root.join("report.json");
         fs::write(
             &report,
-            serde_json::to_vec(&serde_json::json!({"tables": {"browser-screenshots": {"rows": [
-                {"url":"https://example.com/font.woff2", "path":"screenshots/font.png"},
-                {"url":"https://example.com/font.woff2", "path":"outside.png"}
-            ]}}}))
+            serde_json::to_vec(
+                &serde_json::json!({"tables": {"browser-screenshots": {"rows": [
+                    {"url":"https://example.com/font.woff2", "path":"screenshots/font.png"},
+                    {"url":"https://example.com/font.woff2", "path":"outside.png"}
+                ]}}}),
+            )
             .unwrap(),
         )
         .unwrap();
@@ -2728,9 +2699,11 @@ mod tests {
 
     #[test]
     fn stored_configuration_omits_http_auth_password() {
-        let mut configuration = CrawlConfiguration::default();
-        configuration.http_auth_user = "user".into();
-        configuration.http_auth_password = "secret".into();
+        let configuration = CrawlConfiguration {
+            http_auth_user: "user".into(),
+            http_auth_password: "secret".into(),
+            ..Default::default()
+        };
         let stored = configuration.for_storage();
         let json = serde_json::to_string(&stored).unwrap();
         assert!(!json.contains("secret"));
@@ -2818,10 +2791,12 @@ mod tests {
 
     #[test]
     fn command_builder_preserves_paths_as_one_arguments_and_exact_ua() {
-        let mut configuration = CrawlConfiguration::default();
-        configuration.target_url = "https://example.com/path?foo=hello%20world".into();
-        configuration.user_agent = "Mozilla/5.0 Custom Agent".into();
-        configuration.max_depth = 3;
+        let configuration = CrawlConfiguration {
+            target_url: "https://example.com/path?foo=hello%20world".into(),
+            user_agent: "Mozilla/5.0 Custom Agent".into(),
+            max_depth: 3,
+            ..Default::default()
+        };
         let arguments = build_arguments(
             &configuration,
             Some(&configuration.captures[0]),
@@ -2854,9 +2829,11 @@ mod tests {
 
     #[test]
     fn single_page_excludes_depth() {
-        let mut configuration = CrawlConfiguration::default();
-        configuration.single_page = true;
-        configuration.max_depth = 9;
+        let configuration = CrawlConfiguration {
+            single_page: true,
+            max_depth: 9,
+            ..Default::default()
+        };
         let arguments = build_arguments(
             &configuration,
             Some(&configuration.captures[0]),
@@ -2968,10 +2945,12 @@ mod tests {
 
     #[test]
     fn metadata_only_crawl_has_one_report_plan_without_browser_or_screenshot_options() {
-        let mut configuration = CrawlConfiguration::default();
-        configuration.user_agent = "Metadata Checker".into();
-        configuration.browser_path = "/missing/browser".into();
-        configuration.auto_download_browser = true;
+        let mut configuration = CrawlConfiguration {
+            user_agent: "Metadata Checker".into(),
+            browser_path: "/missing/browser".into(),
+            auto_download_browser: true,
+            ..Default::default()
+        };
         for capture in &mut configuration.captures {
             capture.enabled = false;
         }
@@ -3179,7 +3158,7 @@ mod tests {
         let pages = list_seo_page_items(
             &root,
             &CrawlConfiguration::default().captures,
-            &[root.clone()],
+            std::slice::from_ref(&root),
         )
         .unwrap();
         assert_eq!(pages.len(), 2);
@@ -3313,7 +3292,7 @@ mod tests {
         )
         .unwrap();
 
-        let pages = list_seo_page_items(&root, &configured, &[root.clone()]).unwrap();
+        let pages = list_seo_page_items(&root, &configured, std::slice::from_ref(&root)).unwrap();
         assert_eq!(pages.len(), 2);
         let about = pages
             .iter()
