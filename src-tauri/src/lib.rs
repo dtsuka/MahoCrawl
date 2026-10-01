@@ -2615,6 +2615,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn saving_to_filesystem_or_home_root_never_grants_descendant_access() {
+        let root = std::env::temp_dir().join(format!("maho-scope-{}", std::process::id()));
+        fs::create_dir_all(root.join("run")).unwrap();
+        fs::write(root.join("private.png"), b"private").unwrap();
+        fs::write(root.join("run/capture.png"), b"capture").unwrap();
+        for base in [PathBuf::from("/"), dirs_home(), root.clone()] {
+            let mut runtime = RuntimeState::default();
+            register_output_paths(&mut runtime, &base, &root.join("run"));
+            assert!(is_open_path_allowed(&base, &runtime));
+            assert!(!is_open_path_allowed(&root.join("private.png"), &runtime));
+            assert!(!is_path_allowed(&base, &runtime.allowed_open_roots));
+            assert!(is_path_allowed(&root.join("run/capture.png"), &runtime.allowed_open_roots));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn timezone_resolution_uses_system_result_or_utc() {
+        assert_eq!(timezone_or_utc(Ok("Europe/London".into())), "Europe/London");
+        assert_eq!(timezone_or_utc(Err(())), "UTC");
+    }
+
+    #[test]
+    fn output_planning_uses_calendar_timestamp_and_unique_run_folder() {
+        use chrono::TimeZone;
+        let base = std::env::temp_dir().join(format!("maho-plans-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        let configuration = CrawlConfiguration { target_url: "https://example.com".into(), output_root: base.to_string_lossy().into(), ..Default::default() };
+        let now = Local.with_ymd_and_hms(2026, 10, 1, 12, 34, 56).single().unwrap();
+        let (root, plans) = make_output_plans(&configuration, now.into()).unwrap();
+        assert!(root.ends_with("example.com-20261001-123456"));
+        fs::create_dir_all(&root).unwrap();
+        let (second, second_plans) = make_output_plans(&configuration, now.into()).unwrap();
+        assert!(second.ends_with("example.com-20261001-123456-2"));
+        assert_eq!(plans[0].size_slug, second_plans[0].size_slug);
+        assert_eq!(second_plans[0].root, second);
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn shutdown_reaps_child_even_when_runtime_is_poisoned() {
         let state = Arc::new(Mutex::new(RuntimeState::default()));
         let mut command = Command::new("/bin/sh");
@@ -3149,7 +3189,7 @@ mod tests {
         let configuration = CrawlConfiguration::default();
         let (root, plans) =
             make_output_plans(&configuration, UNIX_EPOCH + Duration::from_secs(1234)).unwrap();
-        assert!(root.ends_with("example.com-1234"));
+        assert!(root.ends_with(&format!("example.com-{}", chrono::DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(1234)).format("%Y%m%d-%H%M%S"))));
         assert_eq!(plans.len(), 3);
         assert!(plans[0].captures.ends_with("desktop-1440x900/screenshots"));
         assert!(plans[0]
