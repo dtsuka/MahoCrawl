@@ -6,6 +6,10 @@ MahoCrawl は、Web サイトをクロールしてページごとのスクリー
 
 クロールと撮影には [SiteOne Crawler](https://github.com/janreges/siteone-crawler) を使用しています（アプリに同梱済みのため、別途インストールは不要です）。
 
+![グリッド表示：撮影したスクリーンショットを一覧で確認](docs/images/screenshot-grid.jpg)
+
+![行表示：ページごとのURL・キャプチャ・SEO情報を確認](docs/images/screenshot-list.jpg)
+
 ## 動作環境
 
 - macOS 13 以降
