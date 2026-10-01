@@ -316,7 +316,12 @@ mod tests {
         fs::create_dir_all(root.join("run")).unwrap();
         fs::write(root.join("private.png"), b"private").unwrap();
         fs::write(root.join("run/capture.png"), b"capture").unwrap();
-        for base in [PathBuf::from("/"), dirs_home(), root.clone()] {
+        let filesystem_root = std::env::temp_dir()
+            .ancestors()
+            .last()
+            .unwrap()
+            .to_path_buf();
+        for base in [filesystem_root, dirs_home(), root.clone()] {
             let mut runtime = RuntimeState::default();
             register_output_paths(&mut runtime, &base, &root.join("run"));
             assert!(is_open_path_allowed(&base, &runtime));
@@ -471,5 +476,14 @@ mod tests {
         assert!(!is_path_allowed(&root.join("outside.png"), &allowed));
         assert!(!is_path_allowed(&nested.join("../report.html"), &allowed));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn expands_home_prefix_with_either_separator() {
+        let home = crate::platform::home_dir();
+        assert_eq!(expand_path("~"), home);
+        assert_eq!(expand_path("~/captures"), home.join("captures"));
+        assert_eq!(expand_path("~\\captures"), home.join("captures"));
+        assert_eq!(expand_path("captures"), PathBuf::from("captures"));
     }
 }
