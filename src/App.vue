@@ -1,58 +1,25 @@
 <script setup lang="ts">
+import type { SettingsSection } from './composables/contracts'
+import { useConfigurationPersistence } from './composables/useConfigurationPersistence'
+import { useCrawlRun } from './composables/useCrawlRun'
+import { usePreview } from './composables/usePreview'
+import { useHistory } from './composables/useHistory'
+
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import {
-  clearLog,
-  getEngineVersion,
-  getLog,
-  getStatus,
-  isTauri,
-  listCaptures,
-  listScanRuns,
-  listSeoPages,
-  loadScanRun,
-  loadConfiguration,
-  readCapture,
-  readCaptureThumbnail,
-  openPath,
-  openExternalUrl,
-  revealPath,
-  saveConfiguration,
-  selectOutputFolder,
-  selectScanFolder,
-  startCrawl,
-  stopCrawl,
-  subscribeCaptures,
-  subscribeOutput,
-  subscribeStatus,
-  validateConfigurationRust,
-} from './bridge'
-import {
-  cloneConfiguration,
-  sanitizeConfigurationForStorage,
-  DEFAULT_CONFIGURATION,
-  filterAndSortCaptures,
-  formatBytes,
-  safeSizeSlug,
-  validateConfiguration,
-  type CaptureItem,
-  type CaptureSortOrder,
-  type CaptureViewport,
-  type CrawlConfiguration,
-  type CrawlStatus,
-  type GalleryView,
-  type RunPhase,
-  type ScanRunSummary,
-  type SeoPageItem,
-} from './types'
-import { buildCapturePageIndex, captureIdentity, pageForCapture, searchCaptures, searchSeoPages, sortSeoPages, type SeoPageSortOrder } from './gallery'
+import { clearLog, getEngineVersion, getLog, getStatus, isTauri, loadConfiguration, openPath, openExternalUrl, revealPath, subscribeCaptures, subscribeOutput, subscribeStatus } from './bridge'
+import { cloneConfiguration, DEFAULT_CONFIGURATION, filterAndSortCaptures, safeSizeSlug, validateConfiguration, type CaptureItem, type CaptureSortOrder, type CrawlConfiguration, type CrawlStatus, type GalleryView, type RunPhase, type SeoPageItem } from './types'
+import { buildCapturePageIndex, searchCaptures, searchSeoPages, sortSeoPages, type SeoPageSortOrder } from './gallery'
 import SeoResultsTable from './components/SeoResultsTable.vue'
 import AppIcon from './components/AppIcon.vue'
-import { externalUrl } from './urls'
+import SettingsSidebar from './components/SettingsSidebar.vue'
+import CaptureGrid from './components/CaptureGrid.vue'
+import HistoryModal from './components/HistoryModal.vue'
+import PreviewModal from './components/PreviewModal.vue'
 
-const LOCAL_STORAGE_KEY = 'maho-crawl.configuration.v1'
+import { useOutputBuffer } from './composables/useOutputBuffer'
+
 const GALLERY_VIEW_STORAGE_KEY = 'maho-crawl.gallery-view.v1'
-const PREVIEW_IMAGE_MODE_STORAGE_KEY = 'maho-crawl.preview-image-mode.v1'
-type PreviewImageMode = 'fit' | 'actual' | 'width'
+
 const CAPTURE_PAGE_SIZE = 50
 const configuration = reactive<CrawlConfiguration>(cloneConfiguration(DEFAULT_CONFIGURATION))
 const status = ref<CrawlStatus>({
@@ -77,20 +44,7 @@ const activeCapture = ref<CaptureItem | null>(null)
 const activePageUrl = ref('')
 const activeSizeId = ref<string | null>(null)
 const capturePageIndex = computed(() => buildCapturePageIndex(seoPages.value))
-const selectedCapture = ref<CaptureItem | null>(null)
-const selectedPageTitle = ref('')
-const selectedPageUrl = ref('')
-const displayedPreviewUrl = computed(() => selectedPageUrl.value
-  || (selectedCapture.value ? captureContext(selectedCapture.value).pageUrl : '') || '')
-const displayedActivePageUrl = computed(() => activeCapture.value
-  ? activePageUrl.value || captureContext(activeCapture.value).pageUrl : undefined)
-const selectedImageUrl = ref('')
-const previewError = ref('')
-const previewPending = ref(false)
-const previewModal = ref<HTMLElement | null>(null)
-const previewOpener = ref<HTMLElement | null>(null)
-let previewRequestToken = 0
-let activePreviewRequest: PreviewRequest | null = null
+
 const activeTab = ref<'captures' | 'logs'>('captures')
 const captureFilter = ref('all')
 const sortOrder = ref<CaptureSortOrder | SeoPageSortOrder>('newest')
@@ -103,15 +57,14 @@ function readGalleryViewPreference(): GalleryView {
   }
 }
 const galleryView = ref<GalleryView>(readGalleryViewPreference())
-const logText = ref('')
+const outputBuffer = useOutputBuffer(computed(() => activeTab.value === 'logs'))
+const { logText } = outputBuffer
 const errorMessage = ref('')
 const infoMessage = ref('')
 const capturesRefreshError = ref('')
 const seoRefreshError = ref('')
 const refreshError = computed(() => [capturesRefreshError.value, seoRefreshError.value].filter(Boolean).join(' '))
-const storageError = ref('')
-const saveError = ref('')
-const savingConfiguration = ref(false)
+
 const engineVersion = ref('確認中…')
 const loading = ref(true)
 const starting = ref(false)
@@ -123,27 +76,7 @@ const targetUrlInput = ref<HTMLInputElement | null>(null)
 const capturePage = ref(1)
 const searchInput = ref('')
 const searchQuery = ref('')
-const previewImage = ref<HTMLImageElement | null>(null)
-function readPreviewImageModePreference(): PreviewImageMode {
-  try {
-    const saved = localStorage.getItem(PREVIEW_IMAGE_MODE_STORAGE_KEY)
-    return saved === 'actual' || saved === 'width' ? saved : 'fit'
-  } catch {
-    return 'fit'
-  }
-}
-const previewImageMode = ref<PreviewImageMode>(readPreviewImageModePreference())
-const previewMaximized = ref(false)
-const previewImageLoaded = ref(false)
-const historyOpen = ref(false)
-const historyModal = ref<HTMLElement | null>(null)
-const historyOpener = ref<HTMLElement | null>(null)
-const historyRuns = ref<ScanRunSummary[]>([])
-const historyRoot = ref('')
-const historyLoading = ref(false)
-const historyError = ref('')
-const historyOpeningPath = ref('')
-type SettingsSection = 'target' | 'sizes' | 'capture' | 'crawl' | 'browser' | 'output'
+
 const sectionOpen = reactive<Record<SettingsSection, boolean>>({
   target: true,
   sizes: true,
@@ -152,49 +85,10 @@ const sectionOpen = reactive<Record<SettingsSection, boolean>>({
   browser: true,
   output: true,
 })
-const newSize = reactive({ label: '', width: 1280, height: 800 })
+
 const unlisteners: Array<(() => void) | null> = []
 let disposed = false
 let lifecycleToken = 0
-let initialHydration = true
-let hydrationWatchPending = false
-let activeRunId: string | null = null
-let activeRunRoot: string | null = null
-let runGeneration = 0
-let startAttemptToken = 0
-let saveRevision = 0
-let pendingSave: { revision: number; configuration: CrawlConfiguration } | null = null
-let saveQueue: Promise<void> | null = null
-let capturesRefreshToken = 0
-let seoRefreshToken = 0
-let historyRequestToken = 0
-
-interface PreviewRequest {
-  token: number
-  path: string
-  filename: string
-  pageTitle: string
-  pageUrl: string
-  sizeId: string | null
-}
-
-interface PreviewContext {
-  pageTitle?: string
-  pageUrl?: string
-  sizeId?: string | null
-  initialError?: string
-}
-
-interface PreviewEntry {
-  capture: CaptureItem
-  context: PreviewContext
-}
-
-interface RunSnapshot {
-  runId: string
-  root: string
-  generation: number
-}
 
 const isBusy = computed(() => status.value.phase === 'running' || status.value.phase === 'cancelling')
 const controlsDisabled = computed(() => loading.value || starting.value || isBusy.value)
@@ -243,23 +137,7 @@ const visibleSeoPages = computed(() => {
     : searchedSeoPages.value.filter((page) => page.sizeIds.includes(captureFilter.value))
   return sortSeoPages(filtered, rowSortOrder.value)
 })
-const previewEntries = computed<PreviewEntry[]>(() => {
-  if (galleryView.value === 'grid') {
-    return visibleCaptures.value.map((capture) => ({ capture, context: captureContext(capture) }))
-  }
-  return visibleSeoPages.value.flatMap((page) => page.sizeIds.map((sizeId) => seoPreviewEntry(page, sizeId)))
-})
-const selectedPreviewIndex = computed(() => {
-  const request = activePreviewRequest
-  // selectedCapture is intentionally read here so this computed value updates
-  // when the non-reactive request guard moves to another image.
-  if (!request || !selectedCapture.value) return -1
-  return previewEntries.value.findIndex((entry) => previewEntryMatches(entry, request))
-})
-const canShowPreviousPreview = computed(() => selectedPreviewIndex.value > 0)
-const canShowNextPreview = computed(() => (
-  selectedPreviewIndex.value >= 0 && selectedPreviewIndex.value < previewEntries.value.length - 1
-))
+
 const currentProgress = computed(() => {
   if (!status.value.sizeTotal) return 0
   const completedSizes = Math.max(0, status.value.sizeIndex - 1)
@@ -276,6 +154,146 @@ const reportPath = computed(() => {
   if (selectedPlan) return selectedPlan.htmlReport
   const selectedSize = gallerySizes.value.find((capture) => capture.id === captureFilter.value)
   return selectedSize ? `${root}/${safeSizeSlug(selectedSize)}/report.html` : status.value.currentPlan?.htmlReport || null
+})
+
+const {
+  hydrateLocal,
+  persistLocal,
+  queueNativeSave,
+  normalizeLoaded,
+  ensureConfigurationDefaults,
+  completeHydration,
+  storageError,
+  saveError,
+  savingConfiguration,
+} = useConfigurationPersistence({
+  configuration,
+  loading,
+  configurationReady,
+  isBusy,
+})
+
+const {
+  resetRunArtifacts,
+  applyStatus,
+  currentRunSnapshot,
+  beginCrawl,
+  cancelCrawl,
+  refreshCaptures,
+  refreshSeoPages,
+  retryRefresh,
+  loadPreviewImages,
+  applyStatusEvent,
+  applyCaptureEvent,
+  appendOutputEvent,
+  generation,
+  resetRunIdentity,
+  disposeCrawlRun,
+} = useCrawlRun({
+  activeCapture,
+  activePageUrl,
+  activeSizeId,
+  captures,
+  seoPages,
+  seoLoading,
+  outputBuffer,
+  capturesRefreshError,
+  seoRefreshError,
+  previewUrls,
+  thumbnailLoading,
+  captureFilter,
+  capturePage,
+  searchInput,
+  searchQuery,
+  clearPreviewState: () => clearPreviewState(),
+  status,
+  starting,
+  galleryView,
+  activeTab,
+  loading,
+  isBusy,
+  errorMessage,
+  infoMessage,
+  validationErrors,
+  configuration,
+  persistLocal,
+  queueNativeSave,
+  captureKey,
+  isDisposed,
+})
+
+const {
+  clearPreviewState,
+  captureSiteUrl,
+  isActiveCapture,
+  revealActiveCapture,
+  openPreview,
+  openSeoCapture,
+  navigatePreview,
+  handlePreviewImageError,
+  handlePreviewImageLoad,
+  retryPreview,
+  invalidatePreviewRequest,
+  closePreview,
+  onModalKeydown,
+  previewEntries,
+  selectedPreviewIndex,
+  canShowPreviousPreview,
+  canShowNextPreview,
+  previewImageMode,
+  previewMaximized,
+  previewImageLoaded,
+  selectedCapture,
+  selectedPageTitle,
+  selectedImageUrl,
+  previewError,
+  previewPending,
+  previewModal,
+  previewImage,
+  displayedPreviewUrl,
+  displayedActivePageUrl,
+} = usePreview({
+  activeCapture,
+  activePageUrl,
+  galleryView,
+  visibleCaptures,
+  visibleSeoPages,
+  capturePageIndex,
+  galleryWorkspace,
+  capturePage,
+  CAPTURE_PAGE_SIZE,
+  activeSizeId,
+  gallerySizes,
+})
+
+const {
+  onHistoryModalKeydown,
+  formatScanDate,
+  refreshScanRuns,
+  openHistory,
+  closeHistory,
+  chooseScanFolder,
+  openHistoricalRun,
+  disposeHistory,
+  historyOpen,
+  historyModal,
+  historyRuns,
+  historyRoot,
+  historyLoading,
+  historyError,
+  historyOpeningPath,
+} = useHistory({
+  configuration,
+  isBusy,
+  resetRunIdentity,
+  applyStatus,
+  activeTab,
+  outputBuffer,
+  currentRunSnapshot,
+  refreshCaptures,
+  refreshSeoPages,
+  infoMessage,
+  isDisposed,
 })
 
 function statusLabel(phase: RunPhase): string {
@@ -317,345 +335,8 @@ function statusSubtitle(): string {
   return 'URLを指定して、キャプチャやメタ情報を取得できます'
 }
 
-function persistLocal(): boolean {
-  try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(sanitizeConfigurationForStorage(configuration)))
-    storageError.value = ''
-    return true
-  } catch (error) {
-    storageError.value = `この端末に設定を保存できません。${String(error)}`
-    return false
-  }
-}
-
-async function flushNativeSaves(): Promise<void> {
-  while (pendingSave) {
-    const job = pendingSave
-    pendingSave = null
-    savingConfiguration.value = true
-    try {
-      await saveConfiguration(job.configuration)
-      if (job.revision === saveRevision) saveError.value = ''
-    } catch (error) {
-      if (job.revision === saveRevision) saveError.value = `設定をデスクトップに保存できません。${String(error)}`
-    } finally {
-      savingConfiguration.value = false
-    }
-  }
-}
-
-function queueNativeSave(snapshot: CrawlConfiguration): void {
-  if (!isTauri || loading.value || !configurationReady.value || isBusy.value || validateConfiguration(snapshot).length) return
-  pendingSave = { revision: ++saveRevision, configuration: snapshot }
-  if (!saveQueue) {
-    saveQueue = flushNativeSaves().finally(() => { saveQueue = null })
-  }
-}
-
-function persist(): void {
-  if (initialHydration || loading.value || !configurationReady.value) return
-  persistLocal()
-  if (!isTauri || isBusy.value) return
-  queueNativeSave(sanitizeConfigurationForStorage(configuration))
-}
-
-function normalizeLoaded(value: Partial<CrawlConfiguration>): void {
-  const merged = { ...cloneConfiguration(DEFAULT_CONFIGURATION), ...value }
-  const nextCaptures = Array.isArray(value.captures) ? value.captures : DEFAULT_CONFIGURATION.captures
-  Object.assign(configuration, {
-    ...merged,
-    httpAuthPassword: '',
-    captures: nextCaptures.map((capture, index) => ({ ...DEFAULT_CONFIGURATION.captures[index], ...capture })),
-  })
-}
-
-function ensureConfigurationDefaults(): void {
-  configuration.captures = configuration.captures.map((capture, index) => {
-    const fallback = DEFAULT_CONFIGURATION.captures.find((item) => item.id === capture.id) || DEFAULT_CONFIGURATION.captures[index]
-    return {
-      ...fallback,
-      ...capture,
-      label: capture.label?.trim() || fallback?.label || `サイズ${index + 1}`,
-      width: Number.isFinite(Number(capture.width)) && Number(capture.width) > 0 ? Number(capture.width) : fallback?.width || 1280,
-      height: Number.isFinite(Number(capture.height)) && Number(capture.height) > 0 ? Number(capture.height) : fallback?.height || 800,
-      enabled: capture.enabled !== false,
-    }
-  })
-}
-
-function isTerminalPhase(phase: RunPhase): boolean {
-  return phase === 'succeeded' || phase === 'cancelled' || phase === 'failed'
-}
-
-function clearPreviewState(): void {
-  invalidatePreviewRequest()
-  selectedCapture.value = null
-  selectedPageTitle.value = ''
-  selectedPageUrl.value = ''
-  selectedImageUrl.value = ''
-  previewError.value = ''
-  previewImageLoaded.value = false
-  previewMaximized.value = false
-  previewOpener.value = null
-}
-
-function resetRunArtifacts(): void {
-  activeCapture.value = null
-  activePageUrl.value = ''
-  activeSizeId.value = null
-  capturesRefreshToken += 1
-  seoRefreshToken += 1
-  captures.value = []
-  seoPages.value = []
-  seoLoading.value = false
-  logText.value = ''
-  capturesRefreshError.value = ''
-  seoRefreshError.value = ''
-  for (const key of Object.keys(previewUrls)) delete previewUrls[key]
-  thumbnailLoading.clear()
-  captureFilter.value = 'all'
-  capturePage.value = 1
-  searchInput.value = ''
-  searchQuery.value = ''
-  clearPreviewState()
-}
-
-function applyStatus(next: CrawlStatus): boolean {
-  if (disposed) return false
-  const current = status.value
-  if (activeRunId && next.runId && next.runId !== activeRunId) {
-    // A new run may publish its first running status before start_crawl's
-    // response reaches the UI. Outside that starting window, a different run
-    // id is stale and must not replace the visible run.
-    if (!(starting.value && next.phase === 'running')) return false
-  }
-  if (activeRunId && !next.runId) return false
-  if (activeRunId && next.runId === activeRunId && isTerminalPhase(current.phase) && next.phase === 'running') return false
-  const nextRoot = next.currentPlan?.root || next.plans[0]?.root || null
-  if (activeRunId && next.runId === activeRunId && nextRoot && activeRunRoot && nextRoot !== activeRunRoot) return false
-
-  if (next.runId && next.runId !== activeRunId) {
-    activeRunId = next.runId
-    activeRunRoot = nextRoot
-    runGeneration += 1
-    resetRunArtifacts()
-    if (next.runCaptures.length === 0) {
-      galleryView.value = 'list'
-      activeTab.value = 'captures'
-    }
-  }
-  status.value = next
-  if (next.runId) activeRunId = next.runId
-  if (nextRoot) activeRunRoot = nextRoot
-  return true
-}
-
-function currentRunSnapshot(): RunSnapshot | null {
-  const runId = activeRunId || status.value.runId
-  const root = status.value.currentPlan?.root || activeRunRoot || status.value.plans[0]?.root
-  if (!runId || !root) return null
-  return { runId, root, generation: runGeneration }
-}
-
-function isCurrentRun(snapshot: RunSnapshot): boolean {
-  return !disposed
-    && snapshot.runId === activeRunId
-    && snapshot.root === activeRunRoot
-    && snapshot.generation === runGeneration
-    && status.value.runId === snapshot.runId
-}
-
-function addSize(): void {
-  const label = newSize.label.trim()
-  const width = newSize.width
-  const height = newSize.height
-  const isValidDimension = (value: unknown): value is number => (
-    typeof value === 'number'
-    && Number.isFinite(value)
-    && Number.isInteger(value)
-    && value >= 320
-    && value <= 8192
-  )
-  if (!label || !isValidDimension(width) || !isValidDimension(height)) {
-    errorMessage.value = 'サイズ名・幅・高さを入力してください。'
-    return
-  }
-  const idBase = label.toLocaleLowerCase('en-US').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'size'
-  let id = idBase
-  let suffix = 2
-  while (configuration.captures.some((capture) => capture.id === id)) id = `${idBase}-${suffix++}`
-  configuration.captures.push({ id, label, width, height, enabled: true })
-  newSize.label = ''
-  newSize.width = 1280
-  newSize.height = 800
-  errorMessage.value = ''
-}
-
-function removeSize(id: string): void {
-  configuration.captures = configuration.captures.filter((capture) => capture.id !== id)
-  if (captureFilter.value === id) captureFilter.value = 'all'
-}
-
-function toggleSection(section: SettingsSection): void {
-  sectionOpen[section] = !sectionOpen[section]
-}
-
-function displayedLabel(viewport: CaptureViewport): string {
-  return viewport.label || DEFAULT_CONFIGURATION.captures.find((item) => item.id === viewport.id)?.label || viewport.id
-}
-
-function displayedDimension(viewport: CaptureViewport, key: 'width' | 'height'): number | '' {
-  const value = viewport[key]
-  return Number.isFinite(value) ? value : ''
-}
-
-function updateLabel(viewport: CaptureViewport, event: Event): void {
-  viewport.label = (event.target as HTMLInputElement).value
-}
-
-function updateDimension(viewport: CaptureViewport, key: 'width' | 'height', event: Event): void {
-  const raw = (event.target as HTMLInputElement).value
-  viewport[key] = raw === '' ? Number.NaN : Number(raw)
-}
-
-async function chooseOutputFolder(): Promise<void> {
-  if (!isTauri) return
-  try {
-    const path = await selectOutputFolder()
-    if (path) configuration.outputRoot = path
-  } catch (error) {
-    errorMessage.value = String(error)
-  }
-}
-
-function applyAcceptedStart(response: { runId: string; root: string; totalSizes: number }, runCaptures: CaptureViewport[]): void {
-  const sameRun = activeRunId === response.runId
-  const alreadyTerminal = sameRun && status.value.runId === response.runId && isTerminalPhase(status.value.phase)
-  if (alreadyTerminal) {
-    activeRunRoot = response.root
-    return
-  }
-
-  const current = sameRun && status.value.runId === response.runId && status.value.phase === 'running'
-    ? status.value
-    : {
-        ...status.value,
-        phase: 'running' as const,
-        runId: response.runId,
-        sizeIndex: 0,
-        sizeTotal: response.totalSizes,
-        currentSizeId: null,
-        currentSizeLabel: null,
-        currentPlan: null,
-        plans: [],
-        runCaptures,
-        message: '準備中',
-      }
-  const applied = applyStatus({ ...current, runId: response.runId, sizeTotal: response.totalSizes })
-  // start_crawl returns the output root separately from the status snapshot.
-  // applyStatus remains the single place that resets a new run; this only
-  // completes the accepted response's root for guarded follow-up reads.
-  if (applied) activeRunRoot = response.root
-}
-
-async function beginCrawl(): Promise<void> {
-  if (loading.value || starting.value || isBusy.value) return
-  errorMessage.value = ''
-  infoMessage.value = ''
-  if (!isTauri) {
-    infoMessage.value = 'ブラウザプレビューはサンプル表示のみです。実行はデスクトップアプリで行ってください。'
-    return
-  }
-  if (validationErrors.value.length) {
-    errorMessage.value = validationErrors.value[0]
-    return
-  }
-  const token = ++startAttemptToken
-  const snapshot = cloneConfiguration(configuration)
-  const runCaptures = snapshot.captures.filter((capture) => capture.enabled)
-  starting.value = true
-  try {
-    await validateConfigurationRust(snapshot)
-    if (disposed || token !== startAttemptToken) return
-    persistLocal()
-    queueNativeSave(sanitizeConfigurationForStorage(snapshot))
-    const response = await startCrawl(snapshot)
-    if (disposed || token !== startAttemptToken) return
-    applyAcceptedStart(response, runCaptures)
-  } catch (error) {
-    if (!disposed && token === startAttemptToken) errorMessage.value = String(error)
-  } finally {
-    if (!disposed && token === startAttemptToken) starting.value = false
-  }
-}
-
-async function cancelCrawl(): Promise<void> {
-  if (starting.value || !isBusy.value) return
-  try {
-    if (isTauri) await stopCrawl()
-    else applyStatus({ ...status.value, phase: 'cancelled', message: '停止しました' })
-  } catch (error) {
-    errorMessage.value = String(error)
-  }
-}
-
-async function refreshCaptures(snapshot = currentRunSnapshot()): Promise<void> {
-  if (!isTauri || !snapshot) return
-  const requestToken = ++capturesRefreshToken
-  try {
-    const nextCaptures = await listCaptures(snapshot.root, cloneConfiguration(configuration))
-    if (!isCurrentRun(snapshot) || requestToken !== capturesRefreshToken) return
-    captures.value = nextCaptures
-    capturesRefreshError.value = ''
-  } catch (error) {
-    if (isCurrentRun(snapshot) && requestToken === capturesRefreshToken) capturesRefreshError.value = `キャプチャを更新できません。${String(error)}`
-  }
-}
-
-async function refreshSeoPages(snapshot = currentRunSnapshot()): Promise<void> {
-  if (!isTauri || !snapshot) return
-  const requestToken = ++seoRefreshToken
-  seoLoading.value = true
-  try {
-    const nextPages = await listSeoPages(snapshot.root)
-    if (!isCurrentRun(snapshot) || requestToken !== seoRefreshToken) return
-    seoPages.value = nextPages
-    seoRefreshError.value = ''
-  } catch (error) {
-    if (isCurrentRun(snapshot) && requestToken === seoRefreshToken) seoRefreshError.value = `SEOデータを更新できません。${String(error)}`
-  } finally {
-    if (isCurrentRun(snapshot) && requestToken === seoRefreshToken) seoLoading.value = false
-  }
-}
-
-async function retryRefresh(): Promise<void> {
-  const snapshot = currentRunSnapshot()
-  if (!snapshot) return
-  capturesRefreshError.value = ''
-  seoRefreshError.value = ''
-  await Promise.all([refreshCaptures(snapshot), refreshSeoPages(snapshot)])
-}
-
 function captureKey(capture: CaptureItem): string {
   return capture.path || `${capture.filename}-${capture.sizeId || 'size'}`
-}
-
-async function loadPreviewImages(items: CaptureItem[], snapshot = currentRunSnapshot()): Promise<void> {
-  if (!isTauri || !snapshot) return
-  for (const capture of items) {
-    if (!isCurrentRun(snapshot)) return
-    const key = captureKey(capture)
-    if (previewUrls[key] || thumbnailLoading.has(key)) continue
-    thumbnailLoading.add(key)
-    try {
-      const image = await readCaptureThumbnail(capture.path)
-      if (isCurrentRun(snapshot)) previewUrls[key] = `data:${image.mimeType};base64,${image.dataBase64}`
-    } catch {
-      // Keep the neutral placeholder for a deleted or still-being-written image.
-    } finally {
-      if (isCurrentRun(snapshot)) thumbnailLoading.delete(key)
-    }
-  }
 }
 
 function captureImage(capture: CaptureItem): string {
@@ -666,285 +347,8 @@ function captureThumbnailLoading(capture: CaptureItem): boolean {
   return thumbnailLoading.has(captureKey(capture))
 }
 
-function captureContext(capture: CaptureItem): PreviewContext {
-  const page = pageForCapture(capture, capturePageIndex.value)
-  return page ? { pageTitle: page.title || page.url, pageUrl: page.url } : {}
-}
-
-function captureSiteUrl(capture: CaptureItem): string | null {
-  const page = pageForCapture(capture, capturePageIndex.value)
-  return page ? externalUrl(page.url) : null
-}
-
-function isActiveCapture(capture: CaptureItem): boolean {
-  const key = captureIdentity(capture)
-  return Boolean(key && activeCapture.value && key === captureIdentity(activeCapture.value))
-}
-
-function activeGalleryElement(): HTMLElement | null {
-  return galleryWorkspace.value?.querySelector<HTMLElement>(galleryView.value === 'grid'
-    ? '.capture-card.is-active' : '.size-button.is-active') ?? null
-}
-
-async function revealActiveCapture(): Promise<void> {
-  if (galleryView.value === 'grid') {
-    const index = visibleCaptures.value.findIndex(isActiveCapture)
-    if (index >= 0) capturePage.value = Math.floor(index / CAPTURE_PAGE_SIZE) + 1
-  }
-  await nextTick()
-  activeGalleryElement()?.scrollIntoView?.({ block: 'nearest' })
-}
-
 async function openSiteUrl(url: string): Promise<void> {
   try { await openExternalUrl(url) } catch (error) { errorMessage.value = String(error) }
-}
-
-function rememberPreviewOpener(target?: EventTarget | null): void {
-  const candidate = target as (HTMLElement & { focus?: () => void }) | null | undefined
-  if (candidate && typeof candidate.focus === 'function') {
-    previewOpener.value = candidate
-  } else if (document.activeElement && 'focus' in document.activeElement && !previewModal.value?.contains(document.activeElement)) {
-    previewOpener.value = document.activeElement as HTMLElement
-  } else {
-    previewOpener.value = null
-  }
-}
-
-function isCurrentPreview(request: PreviewRequest): boolean {
-  return request.token === previewRequestToken
-    && activePreviewRequest === request
-    && selectedCapture.value?.path === request.path
-    && selectedCapture.value?.filename === request.filename
-    && selectedCapture.value?.sizeId === request.sizeId
-    && selectedPageTitle.value === request.pageTitle
-    && selectedPageUrl.value === request.pageUrl
-}
-
-function previewEntryMatches(entry: PreviewEntry, request: PreviewRequest): boolean {
-  return entry.capture.path === request.path
-    && entry.capture.filename === request.filename
-    && (entry.context.sizeId ?? entry.capture.sizeId) === request.sizeId
-    && (galleryView.value === 'grid' || (
-      (entry.context.pageTitle || '') === request.pageTitle
-      && (entry.context.pageUrl || '') === request.pageUrl
-    ))
-}
-
-async function openCapturePreview(capture: CaptureItem, context: PreviewContext = {}, opener?: EventTarget | null): Promise<void> {
-  rememberPreviewOpener(opener)
-  const request: PreviewRequest = {
-    token: ++previewRequestToken,
-    path: capture.path,
-    filename: capture.filename,
-    pageTitle: context.pageTitle || '',
-    pageUrl: context.pageUrl || '',
-    sizeId: context.sizeId ?? capture.sizeId,
-  }
-  activePreviewRequest = request
-  selectedCapture.value = capture
-  activeCapture.value = capture
-  activePageUrl.value = request.pageUrl
-  activeSizeId.value = request.sizeId
-  selectedPageTitle.value = request.pageTitle
-  selectedPageUrl.value = request.pageUrl
-  selectedImageUrl.value = ''
-  previewError.value = context.initialError || ''
-  previewPending.value = Boolean(isTauri && capture.path && !context.initialError)
-  previewImageLoaded.value = false
-
-  await revealActiveCapture()
-  if (!isCurrentPreview(request)) return
-  previewModal.value?.focus()
-  if (!isTauri || !capture.path || context.initialError) {
-    previewPending.value = false
-    return
-  }
-  try {
-    const image = await readCapture(capture.path)
-    if (!isCurrentPreview(request)) return
-    selectedImageUrl.value = `data:${image.mimeType};base64,${image.dataBase64}`
-  } catch (error) {
-    if (!isCurrentPreview(request)) return
-    previewError.value = String(error)
-  } finally {
-    if (isCurrentPreview(request)) previewPending.value = false
-  }
-}
-
-function openPreview(capture: CaptureItem, opener?: EventTarget | null): Promise<void> {
-  return openCapturePreview(capture, captureContext(capture), opener)
-}
-
-function pageSizeOptions(page: SeoPageItem): Array<{ id: string; label: string }> {
-  return page.sizeIds.map((id, index) => ({
-    id,
-    label: page.captureBySize?.[id]?.sizeLabel?.trim()
-      || gallerySizes.value.find((viewport) => viewport.id === id)?.label
-      || (page.sizeIds.length === page.sizeLabels.length ? page.sizeLabels[index]?.trim() : '')
-      || id,
-  }))
-}
-
-function seoPreviewEntry(page: SeoPageItem, sizeId: string): PreviewEntry {
-  const size = gallerySizes.value.find((viewport) => viewport.id === sizeId)
-  const label = pageSizeOptions(page).find((option) => option.id === sizeId)?.label || size?.label || sizeId
-  const mappedCapture = page.captureBySize?.[sizeId] || null
-  const capture = mappedCapture && (!isTauri || Boolean(mappedCapture.path))
-    ? {
-        ...mappedCapture,
-        // The mapping key is authoritative even if a malformed report carries
-        // stale metadata inside the CaptureItem itself.
-        sizeId,
-        sizeLabel: mappedCapture.sizeLabel || label,
-        width: mappedCapture.width ?? size?.width ?? null,
-        height: mappedCapture.height ?? size?.height ?? null,
-      }
-    : null
-  const fallback: CaptureItem = {
-    path: '',
-    filename: 'キャプチャ未取得',
-    bytes: 0,
-    modifiedAt: 0,
-    sizeId,
-    sizeLabel: label,
-    width: size?.width || null,
-    height: size?.height || null,
-  }
-  return {
-    capture: capture || fallback,
-    context: {
-      pageTitle: page.title || page.url,
-      pageUrl: page.url,
-      sizeId,
-      initialError: capture ? undefined : mappedCapture ? 'このページ・サイズの画像パスを取得できませんでした' : 'このページ・サイズのキャプチャは未取得です',
-    },
-  }
-}
-
-async function openSeoCapture(page: SeoPageItem, sizeId: string, opener?: EventTarget | null): Promise<void> {
-  const entry = seoPreviewEntry(page, sizeId)
-  await openCapturePreview(entry.capture, entry.context, opener)
-}
-
-function navigatePreview(offset: -1 | 1): void {
-  const nextEntry = previewEntries.value[selectedPreviewIndex.value + offset]
-  if (!nextEntry) return
-  void openCapturePreview(nextEntry.capture, nextEntry.context, previewOpener.value)
-}
-
-function handlePreviewImageError(event: Event): void {
-  if (!activePreviewRequest || !isCurrentPreview(activePreviewRequest)) return
-  const image = event.currentTarget as HTMLImageElement | null
-  if (image && image.src !== selectedImageUrl.value) return
-  selectedImageUrl.value = ''
-  previewPending.value = false
-  previewImageLoaded.value = false
-  previewError.value = '画像データを表示できません'
-}
-
-function handlePreviewImageLoad(event: Event): void {
-  if (!activePreviewRequest || !isCurrentPreview(activePreviewRequest)) return
-  const image = event.currentTarget as HTMLImageElement | null
-  if (image && image.src !== selectedImageUrl.value) return
-  previewImageLoaded.value = true
-}
-
-function retryPreview(): void {
-  const capture = selectedCapture.value
-  const request = activePreviewRequest
-  if (!capture || !request || !capture.path || !isTauri) return
-  void openCapturePreview(capture, {
-    pageTitle: request.pageTitle,
-    pageUrl: request.pageUrl,
-    sizeId: request.sizeId,
-  }, previewOpener.value)
-}
-
-function invalidatePreviewRequest(): void {
-  previewRequestToken += 1
-  activePreviewRequest = null
-  previewPending.value = false
-}
-
-function closePreview(): void {
-  const opener = activeGalleryElement() || previewOpener.value
-  clearPreviewState()
-  if (opener?.isConnected) opener.focus()
-}
-
-function onModalKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    event.stopPropagation()
-    closePreview()
-    return
-  }
-  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-    event.preventDefault()
-    event.stopPropagation()
-    return
-  }
-  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return
-    event.preventDefault()
-    event.stopPropagation()
-    navigatePreview(event.key === 'ArrowLeft' ? -1 : 1)
-    return
-  }
-  if (event.key !== 'Tab') return
-  event.preventDefault()
-  event.stopPropagation()
-  const modal = previewModal.value
-  if (!modal) return
-  const focusable = Array.from(modal.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
-  ))
-  if (!focusable.length) {
-    modal.focus()
-    return
-  }
-  const currentIndex = focusable.indexOf(document.activeElement as HTMLElement)
-  if (currentIndex < 0) {
-    focusable[event.shiftKey ? focusable.length - 1 : 0].focus()
-    return
-  }
-  const nextIndex = event.shiftKey
-    ? (currentIndex - 1 + focusable.length) % focusable.length
-    : (currentIndex + 1) % focusable.length
-  focusable[nextIndex].focus()
-}
-
-function onHistoryModalKeydown(event: KeyboardEvent): void {
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    event.stopPropagation()
-    closeHistory()
-    return
-  }
-  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-    event.preventDefault()
-    event.stopPropagation()
-    return
-  }
-  if (event.key !== 'Tab') return
-  event.preventDefault()
-  event.stopPropagation()
-  const modal = historyModal.value
-  if (!modal) return
-  const focusable = Array.from(modal.querySelectorAll<HTMLElement>(
-    'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
-  ))
-  if (!focusable.length) {
-    modal.focus()
-    return
-  }
-  const currentIndex = focusable.indexOf(document.activeElement as HTMLElement)
-  const nextIndex = currentIndex < 0
-    ? (event.shiftKey ? focusable.length - 1 : 0)
-    : event.shiftKey
-      ? (currentIndex - 1 + focusable.length) % focusable.length
-      : (currentIndex + 1) % focusable.length
-  focusable[nextIndex].focus()
 }
 
 function focusTargetUrl(): void {
@@ -1030,95 +434,6 @@ async function openOutput(): Promise<void> {
   try { await openPath(root) } catch (error) { errorMessage.value = String(error) }
 }
 
-function formatScanDate(timestamp: number): string {
-  if (!timestamp) return '日時不明'
-  return new Intl.DateTimeFormat('ja-JP', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(timestamp * 1000))
-}
-
-async function refreshScanRuns(root = historyRoot.value): Promise<void> {
-  if (!isTauri || !root) return
-  const token = ++historyRequestToken
-  historyLoading.value = true
-  historyError.value = ''
-  try {
-    const runs = await listScanRuns(root)
-    if (disposed || token !== historyRequestToken || !historyOpen.value) return
-    historyRuns.value = runs
-    historyRoot.value = root
-  } catch (error) {
-    if (!disposed && token === historyRequestToken && historyOpen.value) {
-      historyRuns.value = []
-      historyError.value = `スキャン一覧を読み込めません。${String(error)}`
-    }
-  } finally {
-    if (!disposed && token === historyRequestToken) historyLoading.value = false
-  }
-}
-
-async function openHistory(opener?: EventTarget | null): Promise<void> {
-  if (!isTauri || historyOpen.value) return
-  historyOpener.value = opener as HTMLElement | null
-  historyRoot.value = configuration.outputRoot
-  historyRuns.value = []
-  historyError.value = ''
-  historyOpen.value = true
-  await nextTick()
-  historyModal.value?.focus()
-  await refreshScanRuns(configuration.outputRoot)
-}
-
-function closeHistory(): void {
-  if (!historyOpen.value) return
-  historyRequestToken += 1
-  const opener = historyOpener.value
-  historyOpen.value = false
-  historyLoading.value = false
-  historyOpeningPath.value = ''
-  historyOpener.value = null
-  void nextTick(() => opener?.isConnected && opener.focus())
-}
-
-async function chooseScanFolder(): Promise<void> {
-  if (!isTauri || historyLoading.value || historyOpeningPath.value) return
-  try {
-    const selected = await selectScanFolder()
-    if (!selected || !historyOpen.value) return
-    historyRoot.value = selected
-    await refreshScanRuns(selected)
-  } catch (error) {
-    if (historyOpen.value) historyError.value = `フォルダを選択できません。${String(error)}`
-  }
-}
-
-async function openHistoricalRun(run: ScanRunSummary): Promise<void> {
-  if (!isTauri || isBusy.value || historyOpeningPath.value) return
-  historyOpeningPath.value = run.path
-  historyError.value = ''
-  try {
-    const nextStatus = await loadScanRun(run.path)
-    if (disposed || !historyOpen.value) return
-    activeRunId = null
-    activeRunRoot = null
-    if (!applyStatus(nextStatus)) throw new Error('スキャンの表示状態を更新できません。')
-    activeTab.value = 'captures'
-    logText.value = ''
-    closeHistory()
-    const snapshot = currentRunSnapshot()
-    if (snapshot) await Promise.all([refreshCaptures(snapshot), refreshSeoPages(snapshot)])
-    infoMessage.value = '過去のスキャンを開きました。'
-  } catch (error) {
-    if (!disposed && historyOpen.value) historyError.value = `スキャンを開けません。${String(error)}`
-  } finally {
-    historyOpeningPath.value = ''
-  }
-}
-
 async function openCapture(capture: CaptureItem): Promise<void> {
   if (!isTauri) return
   try { await openPath(capture.path) } catch (error) { errorMessage.value = String(error) }
@@ -1139,15 +454,7 @@ function capturePreview(capture: CaptureItem): string {
 
 async function loadInitialState(): Promise<void> {
   const token = ++lifecycleToken
-  let saved: string | null = null
-  try {
-    saved = localStorage.getItem(LOCAL_STORAGE_KEY)
-  } catch (error) {
-    storageError.value = `保存済み設定を読み込めません。${String(error)}`
-  }
-  if (saved) {
-    try { normalizeLoaded(JSON.parse(saved) as Partial<CrawlConfiguration>) } catch { /* ignore malformed local storage */ }
-  }
+  hydrateLocal()
   if (disposed || token !== lifecycleToken) return
   if (isTauri) {
     try {
@@ -1162,10 +469,10 @@ async function loadInitialState(): Promise<void> {
       if (disposed || token !== lifecycleToken) return
       applyStatus(initialStatus)
     } catch { /* idle fallback */ }
-    const logGeneration = runGeneration
+    const logGeneration = generation()
     try {
       const initialLog = await getLog()
-      if (!disposed && token === lifecycleToken && logGeneration === runGeneration) logText.value = initialLog
+      if (!disposed && token === lifecycleToken && logGeneration === generation()) outputBuffer.replace(initialLog)
     } catch { /* empty fallback */ }
   } else {
     engineVersion.value = 'プレビュー'
@@ -1176,10 +483,7 @@ async function loadInitialState(): Promise<void> {
   ensureConfigurationDefaults()
   // The deep watcher may flush after this async hydration finishes. Consume
   // that one initialization change without writing it back to the bridge.
-  hydrationWatchPending = true
-  configurationReady.value = true
-  loading.value = false
-  initialHydration = false
+  completeHydration()
   const snapshot = currentRunSnapshot()
   if (isTauri && snapshot) {
     await Promise.all([refreshCaptures(snapshot), refreshSeoPages(snapshot)])
@@ -1245,26 +549,6 @@ function demoSeoPages(): SeoPageItem[] {
   ]
 }
 
-function applyStatusEvent(next: CrawlStatus): void {
-  if (!applyStatus(next)) return
-  const snapshot = currentRunSnapshot()
-  if (snapshot) {
-    void refreshCaptures(snapshot)
-    void refreshSeoPages(snapshot)
-  }
-}
-
-function applyCaptureEvent(_next: CaptureItem[]): void {
-  const snapshot = currentRunSnapshot()
-  if (snapshot) void refreshCaptures(snapshot)
-}
-
-function appendOutputEvent(text: string): void {
-  if (disposed || !activeRunId || status.value.phase === 'idle') return
-  logText.value += text
-  if (logText.value.length > 400_000) logText.value = logText.value.slice(-400_000)
-}
-
 function onKeydown(event: KeyboardEvent): void {
   if (historyOpen.value) {
     if (event.key === 'Escape') {
@@ -1299,19 +583,7 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
-watch(configuration, () => {
-  if (initialHydration) return
-  if (hydrationWatchPending) {
-    hydrationWatchPending = false
-    return
-  }
-  void persist()
-}, { deep: true })
 watch(galleryView, () => { if (activeCapture.value) void revealActiveCapture() })
-
-watch(previewImageMode, (value) => {
-  try { localStorage.setItem(PREVIEW_IMAGE_MODE_STORAGE_KEY, value) } catch { /* 表示設定の保存は任意 */ }
-})
 
 watch(galleryView, (value) => {
   try { localStorage.setItem(GALLERY_VIEW_STORAGE_KEY, value) } catch { /* preference is optional */ }
@@ -1346,249 +618,371 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  outputBuffer.dispose()
   disposed = true
   lifecycleToken += 1
-  startAttemptToken += 1
+  disposeCrawlRun()
   invalidatePreviewRequest()
-  historyRequestToken += 1
+  disposeHistory()
   window.removeEventListener('keydown', onKeydown)
   unlisteners.forEach((unlisten) => unlisten?.())
 })
+
+function isDisposed(): boolean { return disposed }
+
 </script>
 
 <template>
   <main class="app-shell" :class="{ 'is-busy': isBusy }">
-    <aside ref="sidebarElement" class="settings-sidebar" :class="{ 'sidebar-open': sidebarOpen }" aria-label="クロール設定">
-      <div class="settings-scroll">
-        <section class="setting-section">
-          <h2 class="section-heading" id="target-settings-heading">
-            <button class="section-toggle" type="button" :aria-expanded="sectionOpen.target" aria-controls="target-settings" @click="toggleSection('target')">
-              <span class="section-title">クロール対象</span>
-              <span class="section-chevron" aria-hidden="true"></span>
-            </button>
-          </h2>
-          <div id="target-settings" v-show="sectionOpen.target" class="section-content">
-            <label class="field-label" for="target-url">URL</label>
-            <input id="target-url" ref="targetUrlInput" v-model="configuration.targetUrl" class="text-input" type="url" placeholder="https://example.com" :disabled="controlsDisabled" />
-            <label class="switch-row">
-              <input v-model="configuration.singlePage" type="checkbox" :disabled="controlsDisabled" />
-              <span class="switch" aria-hidden="true"></span><span>このページのみ</span>
-            </label>
-            <label class="field-label" for="user-agent">ユーザーエージェント（カスタム）</label>
-            <input id="user-agent" v-model="configuration.userAgent" class="text-input" type="text" placeholder="空欄ならDesktop" :disabled="controlsDisabled" />
-            <div class="field-grid auth-fields">
-              <label class="field-label" for="http-auth-user">Basic認証（ユーザー名）
-                <input id="http-auth-user" v-model="configuration.httpAuthUser" class="text-input" type="text" autocomplete="off" spellcheck="false" placeholder="任意" aria-describedby="http-auth-note" :disabled="controlsDisabled" />
-              </label>
-              <label class="field-label" for="http-auth-password">パスワード
-                <input id="http-auth-password" v-model="configuration.httpAuthPassword" class="text-input" type="password" autocomplete="off" placeholder="任意" aria-describedby="http-auth-note" :disabled="controlsDisabled" />
-              </label>
-            </div>
-            <p id="http-auth-note" class="path-note">空欄なら認証なし。パスワードは保存せず、実行時だけ対象URLのoriginへ渡します。</p>
-          </div>
-        </section>
-
-        <section class="setting-section sizes-section">
-          <h2 class="section-heading" id="capture-size-settings-heading">
-            <button class="section-toggle" type="button" :aria-expanded="sectionOpen.sizes" aria-controls="capture-size-settings" @click="toggleSection('sizes')">
-              <span class="section-title">キャプチャサイズ</span>
-              <span class="section-chevron" aria-hidden="true"></span>
-            </button>
-          </h2>
-          <div id="capture-size-settings" v-show="sectionOpen.sizes" class="section-content">
-            <p class="section-help">有効なサイズを順番に撮影します。すべてオフ、または削除するとメタ情報のみ取得します。</p>
-            <p v-if="metadataOnly" class="field-note" role="status">キャプチャなしでHTML内のメタ情報を取得します。JavaScriptは実行しません。</p>
-            <div v-for="viewport in configuration.captures" :key="viewport.id" class="size-row">
-              <label class="checkbox-label" :title="`${viewport.label}を有効化`">
-                <input v-model="viewport.enabled" type="checkbox" :disabled="controlsDisabled" :aria-label="`${displayedLabel(viewport)}を有効化`" />
-                <span class="checkmark" aria-hidden="true"><AppIcon name="check" /></span>
-              </label>
-              <div class="size-fields">
-                <input :value="viewport.label" @input="updateLabel(viewport, $event)" class="size-label-input" :disabled="controlsDisabled" :aria-label="`${displayedLabel(viewport)}の名前`" />
-                <div class="dimension-fields">
-                <input :value="displayedDimension(viewport, 'width')" @input="updateDimension(viewport, 'width', $event)" class="dimension-input" type="number" min="320" max="8192" :disabled="controlsDisabled" :aria-label="`${displayedLabel(viewport)}の幅`" />
-                <span>×</span>
-                  <input :value="displayedDimension(viewport, 'height')" @input="updateDimension(viewport, 'height', $event)" class="dimension-input" type="number" min="320" max="8192" :disabled="controlsDisabled" :aria-label="`${displayedLabel(viewport)}の高さ`" />
-                </div>
-              </div>
-              <button class="icon-button delete" type="button" :disabled="controlsDisabled" :aria-label="`${displayedLabel(viewport)}を削除`" @click="removeSize(viewport.id)"><AppIcon name="close" /></button>
-            </div>
-            <div class="add-size-row">
-              <input v-model="newSize.label" class="size-label-input" type="text" placeholder="新しいサイズ" aria-label="新しいサイズ名" :disabled="controlsDisabled" @keydown.enter="addSize" />
-              <input v-model.number="newSize.width" class="dimension-input" type="number" min="320" max="8192" aria-label="新しいサイズの幅" :disabled="controlsDisabled" />
-              <span>×</span>
-              <input v-model.number="newSize.height" class="dimension-input" type="number" min="320" max="8192" aria-label="新しいサイズの高さ" :disabled="controlsDisabled" />
-              <button class="add-button" type="button" :disabled="controlsDisabled" @click="addSize"><AppIcon name="plus" />追加</button>
-            </div>
-          </div>
-        </section>
-
-        <section class="setting-section">
-          <h2 class="section-heading" id="capture-settings-heading">
-            <button class="section-toggle" type="button" :aria-expanded="sectionOpen.capture" aria-controls="capture-settings" @click="toggleSection('capture')">
-              <span class="section-title">撮影設定</span>
-              <span class="section-chevron" aria-hidden="true"></span>
-            </button>
-          </h2>
-          <div id="capture-settings" v-show="sectionOpen.capture" class="section-content">
-            <div class="field-grid">
-              <label class="field-label">撮影モード
-                <select v-model="configuration.screenshotMode" class="select-input" :disabled="controlsDisabled || metadataOnly"><option value="viewport">表示領域</option><option value="full-page">ページ全体</option></select>
-              </label>
-              <label class="field-label">出力フォーマット
-                <select v-model="configuration.screenshotFormat" class="select-input" :disabled="controlsDisabled || metadataOnly"><option value="png">PNG</option><option value="jpg">JPG</option><option value="webp">WebP</option></select>
-              </label>
-            </div>
-            <label class="switch-row">
-              <input v-model="configuration.hideCookieBanner" type="checkbox" disabled aria-describedby="cookie-banner-note" />
-              <span class="switch" aria-hidden="true"></span><span>Cookieバナー自動非表示（現在未対応）</span>
-            </label>
-            <p id="cookie-banner-note" class="field-note">設定値は保存されますが、現在のCLIでは自動非表示を実行しません。</p>
-          </div>
-        </section>
-
-        <section class="setting-section">
-          <h2 class="section-heading" id="crawl-settings-heading">
-            <button class="section-toggle" type="button" :aria-expanded="sectionOpen.crawl" aria-controls="crawl-settings" @click="toggleSection('crawl')">
-              <span class="section-title">クロール設定</span>
-              <span class="section-chevron" aria-hidden="true"></span>
-            </button>
-          </h2>
-          <div id="crawl-settings" v-show="sectionOpen.crawl" class="section-content advanced-fields">
-            <label class="field-label">最大深度<input v-model.number="configuration.maxDepth" class="number-input" type="number" min="0" max="20" :disabled="controlsDisabled || configuration.singlePage" /></label>
-            <label class="field-label">同時ワーカー数<input v-model.number="configuration.workers" class="number-input" type="number" min="1" max="16" :disabled="controlsDisabled" /></label>
-            <label class="field-label">ブラウザワーカー数<input v-model.number="configuration.browserWorkers" class="number-input" type="number" min="1" max="8" :disabled="controlsDisabled || metadataOnly" /></label>
-            <label class="field-label">最大リクエスト / 秒<input v-model.number="configuration.maxRequestsPerSecond" class="number-input" type="number" min="1" max="100" :disabled="controlsDisabled" /></label>
-          </div>
-        </section>
-
-        <section class="setting-section">
-          <h2 class="section-heading" id="browser-settings-heading">
-            <button class="section-toggle" type="button" :aria-expanded="sectionOpen.browser" aria-controls="browser-settings" @click="toggleSection('browser')">
-              <span class="section-title">ブラウザ</span>
-              <span class="section-chevron" aria-hidden="true"></span>
-            </button>
-          </h2>
-          <div id="browser-settings" v-show="sectionOpen.browser" class="section-content">
-            <div class="field-grid">
-              <label class="field-label">待機条件<select v-model="configuration.browserWait" class="select-input" :disabled="controlsDisabled || metadataOnly"><option value="networkidle">通信完了まで</option><option value="load">loadイベントまで</option><option value="domcontentloaded">DOM構築まで</option></select></label>
-              <label class="field-label">タイムアウト（秒）<input v-model.number="configuration.browserTimeout" class="number-input" min="5" max="300" type="number" :disabled="controlsDisabled || metadataOnly" /></label>
-            </div>
-            <label class="field-label">ブラウザのパス<input v-model="configuration.browserPath" class="text-input" type="text" placeholder="自動検出" :disabled="controlsDisabled || metadataOnly" /></label>
-            <label class="switch-row"><input v-model="configuration.autoDownloadBrowser" type="checkbox" :disabled="controlsDisabled || metadataOnly" /><span class="switch" aria-hidden="true"></span><span>見つからない場合に自動取得</span></label>
-          </div>
-        </section>
-
-        <section class="setting-section output-section">
-          <h2 class="section-heading" id="output-settings-heading">
-            <button class="section-toggle" type="button" :aria-expanded="sectionOpen.output" aria-controls="output-settings" @click="toggleSection('output')">
-              <span class="section-title">保存先</span>
-              <span class="section-chevron" aria-hidden="true"></span>
-            </button>
-          </h2>
-          <div id="output-settings" v-show="sectionOpen.output" class="section-content">
-            <div class="output-picker"><input v-model="configuration.outputRoot" class="text-input" type="text" aria-label="保存先フォルダ" :disabled="controlsDisabled" /><button type="button" :disabled="controlsDisabled || !isTauri" @click="chooseOutputFolder">参照…</button></div>
-            <p class="path-note">実行ごとに日時フォルダ、サイズごとに専用フォルダを作成します。</p>
-          </div>
-        </section>
-      </div>
-
-      <div class="sidebar-footer">
-        <button v-if="isBusy" class="primary-button stop-button" type="button" @click="cancelCrawl"><AppIcon name="stop" /> クロールを中止</button>
-        <button v-else class="primary-button" type="button" :disabled="!canStart" @click="beginCrawl"><AppIcon name="play" /> {{ starting ? '準備しています…' : retryableRun ? 'もう一度実行' : 'クロールを開始' }}</button>
-        <p v-if="!isTauri" class="run-note">ブラウザプレビュー・サンプルデータ。実行はデスクトップアプリで行います。</p>
-        <p v-if="savingConfiguration" class="save-note" role="status">設定を保存しています…</p>
-        <p v-if="storageError || saveError" class="save-note error" role="alert">{{ storageError || saveError }}</p>
-        <div class="engine-line"><span class="engine-dot" :class="{ online: engineVersion !== '利用不可' }"></span> Engine: {{ engineVersion }}</div>
-        <div class="license-line">SiteOne Crawler (MIT) · 非公式ラッパー</div>
-      </div>
-    </aside>
-    <div v-if="sidebarOpen" class="sidebar-scrim" aria-hidden="true" @click="closeSidebar"></div>
-
+    <SettingsSidebar
+      @error="errorMessage = $event"
+      @size-removed="(id) => { if (captureFilter === id) captureFilter = 'all' }"
+      :sidebar-open="sidebarOpen"
+      :configuration="configuration"
+      :controls-disabled="controlsDisabled"
+      :section-open="sectionOpen"
+      :metadata-only="metadataOnly"
+      :is-busy="isBusy"
+      :can-start="canStart"
+      :starting="starting"
+      :retryable-run="retryableRun"
+      :saving-configuration="savingConfiguration"
+      :storage-error="storageError"
+      :save-error="saveError"
+      :engine-version="engineVersion"
+      :begin-crawl="beginCrawl"
+      :cancel-crawl="cancelCrawl"
+      :set-sidebar-element="(element) => { sidebarElement = element as HTMLElement | null }"
+      :set-target-url-input="(element) => { targetUrlInput = element as HTMLInputElement | null }"
+    />
+    <div
+      v-if="sidebarOpen"
+      class="sidebar-scrim"
+      aria-hidden="true"
+      @click="closeSidebar"
+    ></div>
     <section class="workspace" aria-label="キャプチャワークスペース">
       <header class="run-header">
-        <button class="sidebar-toggle" type="button" aria-label="設定を表示" :aria-expanded="sidebarOpen" @click="openSidebar($event.currentTarget)">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.25h11M2.5 8h11M2.5 11.75h11" /></svg>
+        <button
+          class="sidebar-toggle"
+          type="button"
+          aria-label="設定を表示"
+          :aria-expanded="sidebarOpen"
+          @click="openSidebar($event.currentTarget)"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <path d="M2.5 4.25h11M2.5 8h11M2.5 11.75h11" />
+          </svg>
         </button>
-        <div class="phase-icon" :class="statusTone(status.phase)" aria-hidden="true"><span v-if="isBusy" class="spinner"></span><AppIcon v-else-if="status.phase === 'succeeded'" name="check" /><AppIcon v-else-if="status.phase === 'failed'" name="alert" /><span v-else class="phase-ring"></span></div>
-        <div class="run-title"><h2>{{ statusTitle() }}</h2><p>{{ statusSubtitle() }}</p></div>
-        <div class="run-actions"><button type="button" :disabled="!isTauri" @click="openHistory($event.currentTarget)"><AppIcon name="history" /><span>過去のスキャン</span></button><button type="button" :disabled="!reportPath || !isTauri" @click="openReport"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h7l3 3v8H3zM10 2.5v3h3M5.5 8h5M5.5 10.5h5" /></svg><span>HTMLレポート</span></button><button type="button" :disabled="!status.runId || !isTauri" @click="openOutput"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h4l1.25 1.5h5.75v7.5h-11zM2.5 4.5v-1h4l1.25 1" /></svg><span>保存先</span></button></div>
+        <div class="phase-icon" :class="statusTone(status.phase)" aria-hidden="true">
+          <span v-if="isBusy" class="spinner"></span>
+          <AppIcon v-else-if="status.phase === 'succeeded'" name="check" />
+          <AppIcon v-else-if="status.phase === 'failed'" name="alert" />
+          <span v-else class="phase-ring"></span>
+        </div>
+        <div class="run-title">
+          <h2>{{ statusTitle() }}</h2>
+          <p>{{ statusSubtitle() }}</p>
+        </div>
+        <div class="run-actions">
+          <button type="button" :disabled="!isTauri" @click="openHistory($event.currentTarget)">
+            <AppIcon name="history" />
+            <span>過去のスキャン</span>
+          </button>
+          <button type="button" :disabled="!reportPath || !isTauri" @click="openReport">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M3 2.5h7l3 3v8H3zM10 2.5v3h3M5.5 8h5M5.5 10.5h5" />
+            </svg>
+            <span>HTMLレポート</span>
+          </button>
+          <button type="button" :disabled="!status.runId || !isTauri" @click="openOutput">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M2.5 4.5h4l1.25 1.5h5.75v7.5h-11zM2.5 4.5v-1h4l1.25 1" />
+            </svg>
+            <span>保存先</span>
+          </button>
+        </div>
       </header>
-      <div v-if="isBusy" class="progress-strip" role="progressbar" :aria-valuenow="runMetadataOnly ? undefined : currentProgress" :aria-valuemin="0" :aria-valuemax="100" :aria-label="progressLabel"><span :style="{ transform: `scaleX(${currentProgress / 100})` }"></span></div>
+      <div
+        v-if="isBusy"
+        class="progress-strip"
+        role="progressbar"
+        :aria-valuenow="runMetadataOnly ? undefined : currentProgress"
+        :aria-valuemin="0"
+        :aria-valuemax="100"
+        :aria-label="progressLabel"
+      >
+        <span :style="{ transform: `scaleX(${currentProgress / 100})` }"></span>
+      </div>
       <div v-if="isBusy" class="progress-label">{{ progressLabel }}<span v-if="status.currentSizeLabel"> · {{ status.currentSizeLabel }}</span></div>
-      <div v-if="errorMessage || infoMessage || refreshError || storageError || saveError || validationErrors.length || (status.phase === 'failed' && status.message)" class="message-area" role="status">
+      <div
+        v-if="errorMessage || infoMessage || refreshError || storageError || saveError || validationErrors.length || (status.phase === 'failed' && status.message)"
+        class="message-area"
+        role="status"
+      >
         <p v-if="errorMessage" class="message error">{{ errorMessage }}</p>
         <p v-else-if="status.phase === 'failed' && status.message" class="message error">{{ status.message }}</p>
         <p v-else-if="validationErrors.length && !isBusy" class="message error">{{ validationErrors[0] }}</p>
         <p v-if="infoMessage" class="message info">{{ infoMessage }}</p>
-        <div v-if="refreshError" class="message error refresh-notice" role="alert"><span>{{ refreshError }}</span><button type="button" @click="retryRefresh">再試行</button></div>
+        <div v-if="refreshError" class="message error refresh-notice" role="alert">
+          <span>{{ refreshError }}</span>
+          <button type="button" @click="retryRefresh">再試行</button>
+        </div>
       </div>
-
-      <nav class="tabs" aria-label="表示切替"><button type="button" :class="{ active: activeTab === 'captures' }" @click="activeTab = 'captures'">{{ runMetadataOnly ? 'メタ情報' : 'キャプチャ' }} <span v-if="runMetadataOnly ? seoPages.length : captures.length">{{ runMetadataOnly ? seoPages.length : captures.length }}</span></button><button type="button" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">ログ</button></nav>
-
+      <nav class="tabs" aria-label="表示切替">
+        <button
+          type="button"
+          :class="{ active: activeTab === 'captures' }"
+          @click="activeTab = 'captures'"
+        >{{ runMetadataOnly ? 'メタ情報' : 'キャプチャ' }} <span v-if="runMetadataOnly ? seoPages.length : captures.length">{{ runMetadataOnly ? seoPages.length : captures.length }}</span></button>
+        <button type="button" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">ログ</button>
+      </nav>
       <div v-if="activeTab === 'captures'" ref="galleryWorkspace" class="gallery-workspace">
         <div class="gallery-toolbar">
-          <div class="filter-pills"><button v-for="option in filterOptions" :key="option.id" type="button" :class="{ active: captureFilter === option.id }" :aria-pressed="captureFilter === option.id" @click="captureFilter = option.id">{{ option.label }} <span>{{ option.count }}</span></button></div>
+          <div class="filter-pills">
+            <button
+              v-for="option in filterOptions"
+              :key="option.id"
+              type="button"
+              :class="{ active: captureFilter === option.id }"
+              :aria-pressed="captureFilter === option.id"
+              @click="captureFilter = option.id"
+            >{{ option.label }} <span>{{ option.count }}</span></button>
+          </div>
           <form class="gallery-search" role="search" @submit.prevent="applySearch">
             <label class="sr-only" for="gallery-search-input">キャプチャとページを検索</label>
-            <input id="gallery-search-input" v-model="searchInput" type="search" placeholder="URL・タイトル・ファイル名を検索" autocomplete="off" />
-            <button type="submit" aria-label="検索"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25" /><path d="m10.25 10.25 3 3" /></svg></button>
-            <button v-if="searchInput || searchQuery" class="search-clear" type="button" aria-label="検索を解除" @click="clearSearch"><AppIcon name="close" /></button>
+            <input
+              id="gallery-search-input"
+              v-model="searchInput"
+              type="search"
+              placeholder="URL・タイトル・ファイル名を検索"
+              autocomplete="off"
+            />
+            <button type="submit" aria-label="検索">
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="7" cy="7" r="4.25" />
+                <path d="m10.25 10.25 3 3" />
+              </svg>
+            </button>
+            <button
+              v-if="searchInput || searchQuery"
+              class="search-clear"
+              type="button"
+              aria-label="検索を解除"
+              @click="clearSearch"
+            >
+              <AppIcon name="close" />
+            </button>
           </form>
-          <div class="sort-tools"><label for="sort-order">並び替え:</label><select id="sort-order" v-model="sortOrder" class="sort-select"><template v-if="galleryView === 'grid'"><option value="newest">取得日時（新しい順）</option><option value="name">ファイル名</option><option value="size">ファイルサイズ</option></template><template v-else><option value="url">URL</option><option value="title">タイトル</option><option value="newest">取得日時（新しい順）</option></template></select><div class="view-mode-toggle" role="group" aria-label="ギャラリー表示"><button class="view-toggle" :class="{ active: galleryView === 'grid' }" type="button" :aria-pressed="galleryView === 'grid'" aria-label="グリッド表示" @click="galleryView = 'grid'"><AppIcon name="grid" /><span class="view-toggle-text">グリッド</span></button><button class="view-toggle" :class="{ active: galleryView === 'list' }" type="button" :aria-pressed="galleryView === 'list'" aria-label="行表示" @click="galleryView = 'list'"><AppIcon name="list" /><span class="view-toggle-text">行</span></button></div></div>
-        </div>
-        <div v-if="loading" class="empty-state"><span class="empty-icon" aria-hidden="true"><span class="spinner"></span></span><h3>準備しています</h3><p>設定を読み込んでいます。</p></div>
-        <div v-else-if="galleryView === 'grid' && runMetadataOnly" class="empty-state"><span class="empty-icon"><AppIcon name="list" /></span><h3>キャプチャなしで実行しています</h3><p>取得したメタ情報は行表示で確認できます。</p><button type="button" class="empty-action" @click="galleryView = 'list'">メタ情報を表示</button></div>
-        <div v-else-if="galleryView === 'grid' && visibleCaptures.length === 0" class="empty-state"><span class="empty-icon"><AppIcon name="image" /></span><h3>{{ searchQuery ? '検索結果がありません' : isBusy ? 'キャプチャを待っています' : 'キャプチャはまだありません' }}</h3><p v-if="searchQuery">URL・タイトル・ファイル名を確認してください。</p><p v-else>{{ isBusy ? '撮影されたページから順に表示します。' : isTauri ? '左側で設定し、クロールを開始してください。' : 'ここではサンプルデータを表示します。実行はデスクトップアプリで行ってください。' }}</p><button v-if="searchQuery" type="button" class="empty-action" @click="clearSearch">検索を解除</button><button v-else-if="isTauri && !isBusy" type="button" class="empty-action" @click="focusTargetUrl">URLを入力する</button></div>
-        <div v-else-if="galleryView === 'list' && seoLoading && seoPages.length === 0" class="empty-state"><span class="empty-icon" aria-hidden="true"><span class="spinner"></span></span><h3>SEOデータを読み込んでいます</h3><p>レポートからページ情報を整理しています。</p></div>
-        <div v-else-if="galleryView === 'list' && visibleSeoPages.length === 0" class="empty-state"><span class="empty-icon"><AppIcon name="list" /></span><h3>{{ searchQuery ? '検索結果がありません' : 'SEOデータは未取得です' }}</h3><p>{{ searchQuery ? 'URL・タイトル・SEO項目を確認してください。' : 'クロール完了後にSiteOneのJSONレポートから表示します。' }}</p><button v-if="searchQuery" type="button" class="empty-action" @click="clearSearch">検索を解除</button><button v-else-if="isTauri && !isBusy" type="button" class="empty-action" @click="focusTargetUrl">URLを入力する</button></div>
-        <div v-else-if="galleryView === 'grid'" class="capture-grid">
-          <article v-for="capture in pagedVisibleCaptures" :key="capture.path || `${capture.filename}-${capture.sizeId || 'size'}`" class="capture-card" :class="{ 'is-active': isActiveCapture(capture) }" :aria-current="isActiveCapture(capture) ? 'true' : undefined" tabindex="0" @click="openPreview(capture, $event.currentTarget)" @dblclick="openCapture(capture)" @keydown.self.enter.prevent="openPreview(capture, $event.currentTarget)" @keydown.self.space.prevent="openPreview(capture, $event.currentTarget)">
-            <div class="capture-thumb" :style="{ background: capturePreview(capture) }"><img v-if="captureImage(capture)" :src="captureImage(capture)" :alt="`${capture.filename}のプレビュー`" /><div v-else-if="!isTauri" class="mock-page"><span></span><i></i><b></b><em></em></div><div v-else-if="captureThumbnailLoading(capture)" class="capture-thumb-state" role="status">画像を読み込み中…</div><div v-else class="capture-thumb-state">画像未取得</div></div>
-            <div class="capture-meta"><div class="capture-file"><AppIcon class="device-icon" :name="capture.width && capture.width > 1000 ? 'desktop' : 'mobile'" /><span class="truncate">{{ capture.filename }}</span></div><div class="capture-tags"><span class="size-tag" :class="capture.sizeId">{{ capture.sizeLabel || 'サイズ' }}</span><span>{{ capture.width }} × {{ capture.height }}</span></div><div class="capture-bottom"><span>{{ formatBytes(capture.bytes) }}</span><span class="capture-actions"><button type="button" @click.stop="openSiteUrl(captureSiteUrl(capture)!)" @dblclick.stop :disabled="!captureSiteUrl(capture)" aria-label="サイトを開く" title="サイトを開く"><AppIcon name="globe" /></button><button type="button" @click.stop="openCapture(capture)" :disabled="!isTauri" aria-label="元画像を開く"><AppIcon name="external" /></button><button type="button" @click.stop="revealCapture(capture)" :disabled="!isTauri" aria-label="Finderで表示"><AppIcon name="folder" /></button></span></div></div>
-          </article>
-        </div>
-        <SeoResultsTable v-else :pages="visibleSeoPages" :sizes="gallerySizes" :active-page-url="displayedActivePageUrl" :active-size-id="activeSizeId" @open-url="openSiteUrl" @open-capture="openSeoCapture" />
-        <footer class="gallery-footer"><template v-if="galleryView === 'grid'"><span>{{ visibleCaptures.length }}件のキャプチャ</span><span v-if="enabledSizes.length"> · {{ enabledSizes.length }}サイズを順次処理</span><nav v-if="capturePageCount > 1" class="pagination" aria-label="キャプチャページ"><button type="button" :disabled="capturePage <= 1" aria-label="前のページ" @click="setCapturePage(capturePage - 1)"><AppIcon name="previous" /></button><span>{{ capturePage }} / {{ capturePageCount }}</span><button type="button" :disabled="capturePage >= capturePageCount" aria-label="次のページ" @click="setCapturePage(capturePage + 1)"><AppIcon name="next" /></button></nav></template><template v-else>{{ visibleSeoPages.length }}件のページ · SEO概要</template></footer>
-      </div>
-      <div v-else class="log-workspace"><div class="log-toolbar"><span>実行ログ</span><button type="button" :disabled="!logText" @click="clearLog().then(() => { logText = '' })">ログを消去</button></div><pre>{{ logText || 'クロールを開始するとログが表示されます。' }}</pre></div>
-    </section>
-    <div v-if="historyOpen" class="preview-backdrop history-backdrop" role="presentation" @click.self="closeHistory">
-      <section ref="historyModal" class="history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title" tabindex="-1" @keydown="onHistoryModalKeydown">
-        <header>
-          <div><h2 id="history-title">過去のスキャン</h2><p>保存済みの結果を選ぶと、キャプチャとSEO情報を再表示します。</p></div>
-          <button type="button" aria-label="過去のスキャンを閉じる" @click="closeHistory"><AppIcon name="close" /></button>
-        </header>
-        <div class="history-toolbar">
-          <div class="history-root"><span>参照中のフォルダ</span><strong :title="historyRoot">{{ historyRoot }}</strong></div>
-          <div class="history-toolbar-actions">
-            <button type="button" :disabled="historyLoading || !!historyOpeningPath" @click="chooseScanFolder"><AppIcon name="folder" />別のフォルダ</button>
-            <button type="button" :disabled="historyLoading || !!historyOpeningPath" aria-label="スキャン一覧を更新" @click="refreshScanRuns()"><AppIcon name="refresh" />更新</button>
+          <div class="sort-tools">
+            <label for="sort-order">並び替え:</label>
+            <select id="sort-order" v-model="sortOrder" class="sort-select">
+              <template v-if="galleryView === 'grid'">
+                <option value="newest">取得日時（新しい順）</option>
+                <option value="name">ファイル名</option>
+                <option value="size">ファイルサイズ</option>
+              </template>
+              <template v-else>
+                <option value="url">URL</option>
+                <option value="title">タイトル</option>
+                <option value="newest">取得日時（新しい順）</option>
+              </template>
+            </select>
+            <div class="view-mode-toggle" role="group" aria-label="ギャラリー表示">
+              <button
+                class="view-toggle"
+                :class="{ active: galleryView === 'grid' }"
+                type="button"
+                :aria-pressed="galleryView === 'grid'"
+                aria-label="グリッド表示"
+                @click="galleryView = 'grid'"
+              >
+                <AppIcon name="grid" />
+                <span class="view-toggle-text">グリッド</span>
+              </button>
+              <button
+                class="view-toggle"
+                :class="{ active: galleryView === 'list' }"
+                type="button"
+                :aria-pressed="galleryView === 'list'"
+                aria-label="行表示"
+                @click="galleryView = 'list'"
+              >
+                <AppIcon name="list" />
+                <span class="view-toggle-text">行</span>
+              </button>
+            </div>
           </div>
         </div>
-        <p v-if="isBusy" class="history-notice">クロール完了後に過去のスキャンを開けます。</p>
-        <p v-if="historyError" class="history-error" role="alert">{{ historyError }}</p>
-        <div class="history-list-wrap">
-          <div v-if="historyLoading" class="history-state" role="status"><span class="spinner" aria-hidden="true"></span><strong>スキャンを探しています</strong><span>フォルダ内の実行結果を確認しています。</span></div>
-          <div v-else-if="historyRuns.length === 0" class="history-state"><AppIcon name="history" /><strong>スキャン結果が見つかりません</strong><span>別の保存先を使っている場合は、フォルダを指定してください。</span><button type="button" @click="chooseScanFolder">フォルダを指定</button></div>
-          <ul v-else class="history-list" aria-label="保存済みスキャン">
-            <li v-for="run in historyRuns" :key="run.path">
-              <div class="history-run-main"><strong :title="run.runId">{{ run.runId }}</strong><span :title="run.path">{{ run.path }}</span></div>
-              <div class="history-run-meta"><time>{{ formatScanDate(run.modifiedAt) }}</time><span>{{ run.sizeCount ? `${run.sizeCount}サイズ` : 'メタ情報のみ' }}</span><span>{{ run.captureCount }}件のキャプチャ</span><span v-if="run.hasHtmlReport">HTMLレポートあり</span></div>
-              <button type="button" :disabled="isBusy || (!!historyOpeningPath && historyOpeningPath !== run.path)" @click="openHistoricalRun(run)">{{ historyOpeningPath === run.path ? '読み込み中…' : '開く' }}</button>
-            </li>
-          </ul>
+        <div v-if="loading" class="empty-state">
+          <span class="empty-icon" aria-hidden="true">
+            <span class="spinner"></span>
+          </span>
+          <h3>準備しています</h3>
+          <p>設定を読み込んでいます。</p>
         </div>
-      </section>
-    </div>
-    <div v-if="selectedCapture" class="preview-backdrop" :class="{ 'is-maximized': previewMaximized }" role="presentation" @click.self="closePreview">
-      <section ref="previewModal" class="preview-modal" :class="{ 'is-maximized': previewMaximized }" role="dialog" aria-modal="true" tabindex="-1" :aria-label="`${selectedPageTitle || selectedCapture.filename}のプレビュー`" @keydown="onModalKeydown">
-        <header><div><h2>{{ selectedPageTitle || selectedCapture.filename }}</h2><a v-if="externalUrl(displayedPreviewUrl)" class="preview-url" :href="externalUrl(displayedPreviewUrl)!" :title="displayedPreviewUrl" @click.prevent="openSiteUrl(displayedPreviewUrl)"><span>{{ displayedPreviewUrl }}</span><AppIcon name="external" /></a><p v-else-if="displayedPreviewUrl" class="preview-url">{{ displayedPreviewUrl }}</p><p class="preview-meta"><span class="preview-filename" :title="selectedCapture.filename">{{ selectedCapture.filename }}</span><span class="preview-size"> · {{ selectedCapture.sizeLabel || 'サイズ未特定' }} · {{ selectedCapture.width || '—' }} × {{ selectedCapture.height || '—' }}</span><span class="preview-bytes"> · {{ formatBytes(selectedCapture.bytes) }}</span></p></div><button type="button" :aria-label="previewMaximized ? '元のサイズに戻す' : 'ウィンドウいっぱいに表示'" :title="previewMaximized ? '元のサイズに戻す' : 'ウィンドウいっぱいに表示'" :aria-pressed="previewMaximized" @click="previewMaximized = !previewMaximized"><AppIcon :name="previewMaximized ? 'restore' : 'maximize'" /></button><button type="button" aria-label="プレビューを閉じる" @click="closePreview"><AppIcon name="close" /></button></header>
-        <div class="preview-toolbar"><div v-if="selectedImageUrl || previewPending || previewError" class="preview-controls" aria-label="画像表示"><span>表示:</span><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'fit' }" :aria-pressed="previewImageMode === 'fit'" @click="previewImageMode = 'fit'">全体</button><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'actual' }" :aria-pressed="previewImageMode === 'actual'" @click="previewImageMode = 'actual'">100%</button><button type="button" :disabled="!previewImageLoaded || !!previewError" :class="{ active: previewImageMode === 'width' }" :aria-pressed="previewImageMode === 'width'" @click="previewImageMode = 'width'">幅100%</button><span v-if="previewImageLoaded && previewImage" class="preview-natural-size">{{ previewImage.naturalWidth }} × {{ previewImage.naturalHeight }}px</span></div><div class="preview-actions"><button class="primary" type="button" :disabled="!isTauri || !selectedCapture.path" @click="openCapture(selectedCapture)">元画像を開く</button><button type="button" :disabled="!isTauri || !selectedCapture.path" @click="revealCapture(selectedCapture)">Finderで表示</button></div></div>
-        <div class="preview-image-area"><div class="preview-image-wrap" :class="{ 'is-actual': previewImageMode === 'actual', 'is-width': previewImageMode === 'width' }"><div v-if="previewPending" class="preview-loading" role="status" aria-live="polite">読み込み中…</div><img v-else-if="selectedImageUrl" ref="previewImage" :style="previewImageMode === 'width' && previewImageLoaded && previewImage ? { width: `min(100%, ${previewImage.naturalWidth}px)` } : undefined" :src="selectedImageUrl" :alt="`${selectedCapture.filename}のプレビュー`" @load="handlePreviewImageLoad" @error="handlePreviewImageError" /><div v-else-if="previewError" class="preview-error"><strong>プレビューを読み込めませんでした</strong><span>{{ previewError }}</span><small>元画像を開くか、Finderで表示してください。</small><button v-if="selectedCapture.path" type="button" @click="retryPreview">再試行</button></div><div v-else-if="!isTauri" class="mock-page large"><span></span><i></i><b></b><em></em></div><div v-else class="preview-error"><strong>プレビュー画像がありません</strong><span>このキャプチャには表示可能な画像がありません。</span></div></div>
-        <button class="preview-arrow is-previous" type="button" :disabled="!canShowPreviousPreview" aria-label="前の画像" title="前の画像（←）" @click="navigatePreview(-1)"><AppIcon name="previous" /></button><button class="preview-arrow is-next" type="button" :disabled="!canShowNextPreview" aria-label="次の画像" title="次の画像（→）" @click="navigatePreview(1)"><AppIcon name="next" /></button></div>
-        <footer><nav class="preview-navigation" aria-label="画像の移動"><span v-if="selectedPreviewIndex >= 0" aria-live="polite">{{ selectedPreviewIndex + 1 }} / {{ previewEntries.length }}</span></nav></footer>
-      </section>
-    </div>
+        <div v-else-if="galleryView === 'grid' && runMetadataOnly" class="empty-state">
+          <span class="empty-icon">
+            <AppIcon name="list" />
+          </span>
+          <h3>キャプチャなしで実行しています</h3>
+          <p>取得したメタ情報は行表示で確認できます。</p>
+          <button type="button" class="empty-action" @click="galleryView = 'list'">メタ情報を表示</button>
+        </div>
+        <div v-else-if="galleryView === 'grid' && visibleCaptures.length === 0" class="empty-state">
+          <span class="empty-icon">
+            <AppIcon name="image" />
+          </span>
+          <h3>{{ searchQuery ? '検索結果がありません' : isBusy ? 'キャプチャを待っています' : 'キャプチャはまだありません' }}</h3>
+          <p v-if="searchQuery">URL・タイトル・ファイル名を確認してください。</p>
+          <p v-else>{{ isBusy ? '撮影されたページから順に表示します。' : isTauri ? '左側で設定し、クロールを開始してください。' : 'ここではサンプルデータを表示します。実行はデスクトップアプリで行ってください。' }}</p>
+          <button
+            v-if="searchQuery"
+            type="button"
+            class="empty-action"
+            @click="clearSearch"
+          >検索を解除</button>
+          <button
+            v-else-if="isTauri && !isBusy"
+            type="button"
+            class="empty-action"
+            @click="focusTargetUrl"
+          >URLを入力する</button>
+        </div>
+        <div
+          v-else-if="galleryView === 'list' && seoLoading && seoPages.length === 0"
+          class="empty-state"
+        >
+          <span class="empty-icon" aria-hidden="true">
+            <span class="spinner"></span>
+          </span>
+          <h3>SEOデータを読み込んでいます</h3>
+          <p>レポートからページ情報を整理しています。</p>
+        </div>
+        <div v-else-if="galleryView === 'list' && visibleSeoPages.length === 0" class="empty-state">
+          <span class="empty-icon">
+            <AppIcon name="list" />
+          </span>
+          <h3>{{ searchQuery ? '検索結果がありません' : 'SEOデータは未取得です' }}</h3>
+          <p>{{ searchQuery ? 'URL・タイトル・SEO項目を確認してください。' : 'クロール完了後にSiteOneのJSONレポートから表示します。' }}</p>
+          <button
+            v-if="searchQuery"
+            type="button"
+            class="empty-action"
+            @click="clearSearch"
+          >検索を解除</button>
+          <button
+            v-else-if="isTauri && !isBusy"
+            type="button"
+            class="empty-action"
+            @click="focusTargetUrl"
+          >URLを入力する</button>
+        </div>
+        <CaptureGrid
+          v-else-if="galleryView === 'grid'"
+          :paged-visible-captures="pagedVisibleCaptures"
+          :is-active-capture="isActiveCapture"
+          :open-preview="openPreview"
+          :capture-site-url="captureSiteUrl"
+          :capture-preview="capturePreview"
+          :capture-image="captureImage"
+          :capture-thumbnail-loading="captureThumbnailLoading"
+          :open-capture="openCapture"
+          :reveal-capture="revealCapture"
+          :open-site-url="openSiteUrl"
+        />
+        <SeoResultsTable
+          v-else
+          :pages="visibleSeoPages"
+          :sizes="gallerySizes"
+          :active-page-url="displayedActivePageUrl"
+          :active-size-id="activeSizeId"
+          @open-url="openSiteUrl"
+          @open-capture="openSeoCapture"
+        />
+        <footer class="gallery-footer">
+          <template v-if="galleryView === 'grid'">
+            <span>{{ visibleCaptures.length }}件のキャプチャ</span>
+            <span v-if="enabledSizes.length"> · {{ enabledSizes.length }}サイズを順次処理</span>
+            <nav v-if="capturePageCount > 1" class="pagination" aria-label="キャプチャページ">
+              <button
+                type="button"
+                :disabled="capturePage <= 1"
+                aria-label="前のページ"
+                @click="setCapturePage(capturePage - 1)"
+              >
+                <AppIcon name="previous" />
+              </button>
+              <span>{{ capturePage }} / {{ capturePageCount }}</span>
+              <button
+                type="button"
+                :disabled="capturePage >= capturePageCount"
+                aria-label="次のページ"
+                @click="setCapturePage(capturePage + 1)"
+              >
+                <AppIcon name="next" />
+              </button>
+            </nav>
+          </template>
+          <template v-else>{{ visibleSeoPages.length }}件のページ · SEO概要</template>
+        </footer>
+      </div>
+      <div v-else class="log-workspace">
+        <div class="log-toolbar">
+          <span>実行ログ</span>
+          <button
+            type="button"
+            :disabled="!logText"
+            @click="clearLog().then(() => outputBuffer.clear())"
+          >ログを消去</button>
+        </div>
+        <pre>{{ logText || 'クロールを開始するとログが表示されます。' }}</pre>
+      </div>
+    </section>
+    <HistoryModal
+      v-if="historyOpen"
+      :is-busy="isBusy"
+      :history-open="historyOpen"
+      :history-root="historyRoot"
+      :history-loading="historyLoading"
+      :history-opening-path="historyOpeningPath"
+      :history-error="historyError"
+      :history-runs="historyRuns"
+      :on-history-modal-keydown="onHistoryModalKeydown"
+      :close-history="closeHistory"
+      :choose-scan-folder="chooseScanFolder"
+      :refresh-scan-runs="refreshScanRuns"
+      :format-scan-date="formatScanDate"
+      :open-historical-run="openHistoricalRun"
+      :set-history-modal="(element) => { historyModal = element as HTMLElement | null }"
+    />
+    <PreviewModal
+      v-if="selectedCapture"
+      :open-capture="openCapture"
+      :reveal-capture="revealCapture"
+      :open-site-url="openSiteUrl"
+      :selected-capture="selectedCapture"
+      v-model:previewMaximized="previewMaximized"
+      :selected-page-title="selectedPageTitle"
+      :displayed-preview-url="displayedPreviewUrl"
+      :selected-image-url="selectedImageUrl"
+      :preview-pending="previewPending"
+      :preview-error="previewError"
+      :preview-image-loaded="previewImageLoaded"
+      v-model:previewImageMode="previewImageMode"
+      :preview-image="previewImage"
+      :can-show-previous-preview="canShowPreviousPreview"
+      :can-show-next-preview="canShowNextPreview"
+      :selected-preview-index="selectedPreviewIndex"
+      :preview-entries="previewEntries"
+      :close-preview="closePreview"
+      :on-modal-keydown="onModalKeydown"
+      :handle-preview-image-load="handlePreviewImageLoad"
+      :handle-preview-image-error="handlePreviewImageError"
+      :retry-preview="retryPreview"
+      :navigate-preview="navigatePreview"
+      :set-preview-modal="(element) => { previewModal = element as HTMLElement | null }"
+      :set-preview-image="(element) => { previewImage = element as HTMLImageElement | null }"
+    />
   </main>
 </template>
