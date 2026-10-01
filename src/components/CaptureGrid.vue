@@ -85,7 +85,7 @@ defineProps<{
               type="button"
               @click.stop="revealCapture(capture)"
               :disabled="!isTauri"
-              aria-label="Finderで表示"
+              aria-label="フォルダで表示"
             >
               <AppIcon name="folder" />
             </button>
