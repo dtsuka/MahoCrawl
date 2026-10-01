@@ -2,7 +2,7 @@
 
 [日本語](README.md) | English
 
-MahoCrawl is a macOS app that crawls a website and captures screenshots and SEO information for each page. It captures multiple screen sizes, such as Desktop, Tablet, and Mobile, one after another in a single run, and lets you review the results in a gallery.
+MahoCrawl is a macOS and Windows app that crawls a website and captures screenshots and SEO information for each page. It captures multiple screen sizes, such as Desktop, Tablet, and Mobile, one after another in a single run, and lets you review the results in a gallery.
 
 Crawling and capturing are powered by [SiteOne Crawler](https://github.com/janreges/siteone-crawler). It is bundled with the app, so no separate installation is required.
 
@@ -14,20 +14,25 @@ Crawling and capturing are powered by [SiteOne Crawler](https://github.com/janre
 
 ## Requirements
 
-- macOS 13 or later
-- A Mac with Apple Silicon (M1 or later) or an Intel processor
+- macOS 13 or later (Apple Silicon (M1 or later) or Intel Mac)
+- Windows 10 / 11 (64-bit) — beta
 - A Chromium-based browser such as Google Chrome (used for taking screenshots)
 
 ## Download and installation
 
-1. Open the [Releases page](https://github.com/dtsuka/MahoCrawl/releases/latest) and download the zip file for your Mac.
-   - Apple Silicon (M1 or later): `MahoCrawl_<version>_aarch64.zip`
-   - Intel: `MahoCrawl_<version>_x86_64.zip`
-   - If you are not sure which one you have, choose Apple menu → "About This Mac" from the menu bar and check "Chip" (or "Processor"). If it starts with "Apple M", you have Apple Silicon. If it says "Intel", you have an Intel Mac.
+Open the [Releases page](https://github.com/dtsuka/MahoCrawl/releases/latest) and download the file for your computer.
+
+| File | For |
+| --- | --- |
+| `MahoCrawl_<version>_aarch64.zip` | Mac with Apple Silicon (M1 or later) |
+| `MahoCrawl_<version>_x86_64.zip` | Mac with an Intel processor |
+| `MahoCrawl_<version>_x64-setup.exe` | Windows (64-bit) |
+
+### macOS
+
+1. If you are not sure which Mac you have, choose Apple menu → "About This Mac" from the menu bar and check "Chip" (or "Processor"). If it starts with "Apple M", you have Apple Silicon. If it says "Intel", you have an Intel Mac.
 2. Double-click the downloaded zip file to extract it.
 3. Move `MahoCrawl.app` to your Applications folder.
-
-### First launch
 
 MahoCrawl is not signed with an Apple Developer ID or notarized, so macOS shows a warning such as "cannot be opened because the developer cannot be verified" the first time you open it. Use one of the following methods to open it:
 
@@ -35,6 +40,15 @@ MahoCrawl is not signed with an Apple Developer ID or notarized, so macOS shows 
 - Try to open the app once, then go to System Settings → Privacy & Security and click "Open Anyway".
 
 After the first launch, you can open the app normally by double-clicking it.
+
+### Windows (beta)
+
+The Windows version is in beta. If you find a problem, please report it in [Issues](https://github.com/dtsuka/MahoCrawl/issues).
+
+1. Run the downloaded `MahoCrawl_<version>_x64-setup.exe` and follow the on-screen instructions. Administrator rights are not required.
+2. After installation, start MahoCrawl from the Start menu.
+
+MahoCrawl is not code-signed, so Windows may show "Windows protected your PC" when you run the installer. If it does, click "More info" and then "Run anyway".
 
 ## Usage
 
@@ -77,7 +91,7 @@ MahoCrawl uses a Chromium-based browser installed on your Mac, such as Google Ch
 
 ## Output files
 
-By default, results are saved to `~/Pictures/MahoCrawl/` (you can change the output folder). Each run gets a folder named with the date and time, and each capture size gets its own subfolder.
+By default, results are saved to `Pictures/MahoCrawl/` in your home folder (`~/Pictures/MahoCrawl/` on macOS, `C:\Users\<user name>\Pictures\MahoCrawl\` on Windows). You can change the output folder. Each run gets a folder named with the date and time, and each capture size gets its own subfolder.
 
 ```text
 ~/Pictures/MahoCrawl/example.com-20260818-120000/
