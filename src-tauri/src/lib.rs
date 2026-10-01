@@ -2633,6 +2633,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn entrypoint_delegates_to_focused_modules() {
+        let entrypoint = include_str!("lib.rs");
+        assert!(entrypoint.lines().count() < 200, "entrypoint still contains all implementation");
+        for name in ["config", "paths", "process", "report", "commands"] {
+            assert!(entrypoint.contains(&format!("mod {name};")));
+        }
+    }
+
+    #[test]
     fn saving_to_filesystem_or_home_root_never_grants_descendant_access() {
         let root = std::env::temp_dir().join(format!("maho-scope-{}", std::process::id()));
         fs::create_dir_all(root.join("run")).unwrap();
